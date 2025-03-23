@@ -43,9 +43,6 @@ cd adaptive-reasoning-boundaries
 
 # Install dependencies
 pip install -r requirements.txt
-
-# Download datasets
-python scripts/download_datasets.py
 ```
 
 ## 🔧 Installation
