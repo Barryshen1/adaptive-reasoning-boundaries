@@ -6,7 +6,6 @@ import json
 import os
 import re
 from copy import deepcopy
-from tqdm import tqdm
 
 
 def judge_error(pred):
@@ -141,12 +140,22 @@ class RequestOutput:
         Returns:
             Predicted answer
         """
-        pred_list = [s for s in re.findall(r'-?\d+\.?\,?\d*', self.get_last_pred_text(idx).replace(",", "").strip(".").split("=")[-1])]
+        pred_text = self.get_last_pred_text(idx)
+        
+        # Try to find answer after #### marker
+        if "####" in pred_text:
+            answer_part = pred_text.split("####")[-1].strip()
+            # Extract the first number
+            matches = re.findall(r'-?\d+\.?\,?\d*', answer_part.replace(",", ""))
+            if matches:
+                return matches[0]
+        
+        # Try other extraction methods
+        pred_list = [s for s in re.findall(r'-?\d+\.?\,?\d*', pred_text.replace(",", "").strip(".").split("=")[-1])]
         if len(pred_list) == 0:
-            pred1 = -1
+            return -1
         else:
-            pred1 = pred_list[-1]
-        return pred1
+            return pred_list[-1]
     
     def get_parsed_pred_answer(self, idx):
         """
@@ -159,7 +168,7 @@ class RequestOutput:
             Parsed predicted answer
         """
         pred_str = self.get_last_pred_text(idx)
-        if "var1" not in pred_str or "<<" not in pred_str:
+        if "var" not in pred_str or "<<" not in pred_str:
             pred_list = [s for s in re.findall(r'-?\d+\.?\,?\d*', pred_str.replace(",", "").strip(".").split("=")[-1])]
             if len(pred_list) == 0:
                 pred1 = -1
@@ -171,6 +180,7 @@ class RequestOutput:
                 eqs = [s for s in re.findall(r'<<(.*?)>>', pred_str) if "=" in s]
                 eqs = sorted(eqs, key=lambda x: int(x.split("=")[0].strip("var")))
                 var_list = {eq.split("=")[0]: None for eq in eqs}
+                
                 for eq in eqs:
                     if "=" in eq:
                         func_str = eq.split("=")[1]
@@ -184,15 +194,18 @@ class RequestOutput:
                                 return -1
                     elif "var" in eq:
                         pred_str += "#### " + eq
+                        
                 if "####" in pred_str:
                     var_key = pred_str.split("####")[-1].strip().strip(".").replace("<", "").replace(">", "")
                     if var_key in var_list:
                         return var_list[var_key]
+                        
                 last_var = var_list[list(var_list.keys())[-1]]
                 if last_var is None:
                     last_var = -1
             except:
                 return -1
+                
             return last_var
     
     def get_program_answer(self, idx):
@@ -441,4 +454,57 @@ class MMRequestor:
                             "role": msg["role"],
                             "content": [{"type": "text", "text": msg["content"]}]
                         })
-                    responses.append(formatted_
+                    responses.append(formatted_chat)
+                
+                res_str = formatted_chat
+                if not self.enable_multi_turn:
+                    self.chat = []
+                return res_str
+            else:
+                # Single prompt
+                prompt = prompts
+                
+                if not self.chat:
+                    # First message
+                    response = await self.requestor.messages.create(
+                        model=self.model_name,
+                        max_tokens=kwargs.get("max_tokens", 1024),
+                        temperature=kwargs.get("temperature", 0.7),
+                        system=kwargs.get("system_prompt", ""),
+                        messages=[
+                            {"role": "user", "content": prompt}
+                        ]
+                    )
+                    self.chat = [
+                        {"role": "user", "content": prompt},
+                        {"role": "assistant", "content": response.content[0].text}
+                    ]
+                else:
+                    # Subsequent messages
+                    messages = []
+                    for msg in self.chat:
+                        messages.append({"role": msg["role"], "content": msg["content"]})
+                    messages.append({"role": "user", "content": prompt})
+                    
+                    response = await self.requestor.messages.create(
+                        model=self.model_name,
+                        max_tokens=kwargs.get("max_tokens", 1024),
+                        temperature=kwargs.get("temperature", 0.7),
+                        system=kwargs.get("system_prompt", ""),
+                        messages=messages
+                    )
+                    self.chat.append({"role": "user", "content": prompt})
+                    self.chat.append({"role": "assistant", "content": response.content[0].text})
+                
+                # Convert to standard format
+                formatted_chat = []
+                for msg in self.chat:
+                    formatted_chat.append({
+                        "role": msg["role"],
+                        "content": [{"type": "text", "text": msg["content"]}]
+                    })
+                
+                res_str = formatted_chat
+                if not self.enable_multi_turn:
+                    self.chat = []
+                return res_str
