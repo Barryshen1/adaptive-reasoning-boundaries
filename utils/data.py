@@ -223,7 +223,7 @@ def load_dataset(dataset_name, split="train", sample_size=None):
                 "answer": item["answer"],
                 "facts": item.get("facts", []),
                 "decomposition": item.get("decomposition", []),
-                "index": str(len(processed_data))
+                "index": str(i)
             })
     
     else:
