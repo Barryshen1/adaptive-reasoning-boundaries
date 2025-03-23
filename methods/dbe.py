@@ -1,6 +1,7 @@
 """
 Implementation of Dynamic Boundary Estimation (DBE)
 """
+import re
 import numpy as np
 from collections import defaultdict
 
@@ -10,7 +11,7 @@ class DBE:
     Dynamic Boundary Estimation (DBE)
     
     DBE enables real-time assessment of model reasoning boundaries during interaction 
-    through calibrated probes and adaptive prompting adjustments.
+    through a series of calibrated probes and adaptive prompting adjustments.
     """
     
     def __init__(self, 
@@ -149,10 +150,62 @@ class DBE:
                 # Additional metrics that would be extracted from actual responses
                 "response_time": np.random.normal(1.0 + probe["difficulty"] * 0.5, 0.2),
                 "confidence_markers": np.random.normal(1.0 - probe["difficulty"] * 0.2, 0.1),
-                "self_corrections": int(np.random.poisson(probe["difficulty"] - 1.0) if probe["difficulty"] > 1.0 else 0)
+                "self_corrections": int(np.random.poisson(probe["difficulty"] - 1.0) if probe["difficulty"] > 1.0 else 0),
+                "response": self._generate_simulated_response(probe, simulated_correct)
             })
         
         return results, selected_probes
+    
+    def _generate_simulated_response(self, probe, correct):
+        """
+        Generate a simulated model response for a probe
+        
+        Args:
+            probe: The probe
+            correct: Whether the answer is correct
+            
+        Returns:
+            Simulated response text
+        """
+        difficulty = probe["difficulty"]
+        query = probe["query"]
+        
+        # Add hesitation markers based on difficulty
+        hesitation_markers = [
+            "I think", "Let me calculate this", "This seems like", 
+            "If I remember correctly", "I believe", "Probably"
+        ]
+        
+        # Add self-correction markers based on difficulty
+        correction_markers = [
+            "Wait, I made a mistake", "Let me recalculate", "Actually", 
+            "Sorry, I meant", "Correction:"
+        ]
+        
+        # Generate simulated response
+        if correct:
+            if difficulty < 2.0:
+                # Low difficulty, confident response
+                return f"The answer is {np.random.randint(100, 1000)}."
+            elif difficulty < 3.0:
+                # Medium difficulty, some hesitation
+                marker = np.random.choice(hesitation_markers) if np.random.random() < 0.5 else ""
+                return f"{marker} The answer is {np.random.randint(100, 1000)}."
+            else:
+                # High difficulty, potential self-correction
+                if np.random.random() < 0.3:
+                    correction = np.random.choice(correction_markers)
+                    return f"The answer is {np.random.randint(100, 1000)}. {correction} The answer is actually {np.random.randint(1000, 5000)}."
+                else:
+                    marker = np.random.choice(hesitation_markers)
+                    return f"{marker} After working through this step by step, I think the answer is {np.random.randint(1000, 5000)}."
+        else:
+            # Incorrect response with hesitation or confusion
+            marker = np.random.choice(hesitation_markers)
+            if np.random.random() < 0.3:
+                return f"{marker} I'm not entirely sure, but I think the answer is {np.random.randint(100, 1000)}?"
+            else:
+                return f"{marker} The answer is {np.random.randint(100, 1000)}."
     
     def estimate_boundaries(self, probe_results, model):
         """
@@ -209,10 +262,10 @@ class DBE:
             Category name
         """
         # In a real implementation, this would look at the probe content
-        # For this template, we'll assume each probe knows its category
+        # For this template, we'll check which category contains this probe
         
         for category, probes in self.probes.items():
-            if probe in probes:
+            if any(p["query"] == probe["query"] for p in probes):
                 return category
         
         # Default fallback
@@ -293,14 +346,29 @@ class DBE:
             if category not in confidence_factors:
                 confidence_factors[category] = []
             
-            # Extract confidence metrics
-            # In a real implementation, these would be derived from actual responses
-            hesitation = 1.0 - result["confidence_markers"]
-            corrections = min(1.0, result["self_corrections"] * 0.2)
-            response_time_factor = min(1.0, result["response_time"] * 0.2)
+            # Extract confidence metrics from response
+            response_text = result.get("response", "")
+            
+            # Hesitation markers (e.g., "I think", "probably", "might")
+            hesitation_pattern = r'\b(think|probably|might|possibly|perhaps|maybe|not sure|uncertain)\b'
+            hesitation = len(re.findall(hesitation_pattern, response_text.lower())) * 0.1
+            hesitation = min(1.0, hesitation + 0.2 if "?" in response_text else hesitation)
+            
+            # Self-correction patterns
+            correction_pattern = r'\b(actually|correction|mistake|error|oops|let me recalculate|no wait|sorry)\b'
+            corrections = len(re.findall(correction_pattern, response_text.lower())) * 0.2
+            
+            # Response time factor (longer time suggests lower confidence)
+            response_time_factor = min(1.0, result.get("response_time", 1.0) * 0.2)
+            
+            # Consistency in repeated calculations (simulated)
+            consistency = 0.0
+            if "repeated_calculations" in result:
+                unique_answers = set([calc["answer"] for calc in result.get("repeated_calculations", [])])
+                consistency = 0.3 if len(unique_answers) > 1 else 0.0
             
             # Overall confidence metric (lower is less confident)
-            confidence = 1.0 - (hesitation + corrections + response_time_factor) / 3
+            confidence = 1.0 - min(1.0, (hesitation + corrections + response_time_factor + consistency))
             
             confidence_factors[category].append(confidence)
         
@@ -419,7 +487,10 @@ class DBE:
         if previous_prompt and previous_response:
             # In a real implementation, analyze the response for errors or confusion
             # and adapt the prompt accordingly
-            pass
+            if "I'm not sure" in previous_response or "I don't know" in previous_response:
+                prompt = self._generate_scaffolded_prompt(task, combined_boundary * 0.7)
+            elif any(marker in previous_response for marker in ["actually", "correction", "mistake"]):
+                prompt = f"Let's approach this problem step by step, making sure each calculation is precise:\n{task}"
         
         return prompt
     
@@ -433,11 +504,11 @@ class DBE:
         Returns:
             Estimated difficulty
         """
-        # In a real implementation, this would use NLP techniques
-        # For this template, we'll use a simple heuristic
+        # Count words as basic complexity measure
+        word_count = len(task.split())
         
-        # Count indicators of difficulty
-        difficulty_indicators = [
+        # Count special keywords that indicate complexity
+        complexity_indicators = [
             "complex", "challenging", "difficult",
             "multi-step", "advanced", "calculate",
             "prove", "explain", "analyze"
@@ -446,12 +517,20 @@ class DBE:
         difficulty_score = 1.0  # Base difficulty
         
         # Adjust based on presence of indicators
-        for indicator in difficulty_indicators:
+        for indicator in complexity_indicators:
             if indicator in task.lower():
                 difficulty_score += 0.5
         
         # Adjust based on length (longer tasks are often more complex)
         difficulty_score += len(task.split()) / 100
+        
+        # Count numbers as indicators of calculation complexity
+        number_count = len(re.findall(r'\d+', task))
+        difficulty_score += number_count * 0.1
+        
+        # Check for mathematical operations
+        if any(op in task for op in ["+", "-", "*", "/", "^", "="]):
+            difficulty_score += 0.5
         
         return difficulty_score
     
@@ -542,7 +621,7 @@ class DBE:
         
         # Generate adapted prompt
         adapted_prompt = self.adapt_prompting_strategy(task, combined_boundary, 
-                                                      previous_prompt, previous_response)
+                                                     previous_prompt, previous_response)
         
         # Update interaction history (in real implementation, would include the response)
         self.interaction_history.append({
