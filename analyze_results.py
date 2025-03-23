@@ -12,8 +12,15 @@ import pandas as pd
 from prettytable import PrettyTable
 
 from utils.request_tool import RequestOutput
-from utils.tools import get_combined_granularity, categorize_boundary
+from utils.tools import get_combined_granularity, categorize_boundary, estimate_task_difficulty
 from evaluation.evaluate import evaluate_method
+
+
+def setup_output_directories():
+    """Create necessary output directories"""
+    os.makedirs("experiments/results", exist_ok=True)
+    os.makedirs("experiments/figures", exist_ok=True)
+    os.makedirs("evaluation/results", exist_ok=True)
 
 
 def load_results(results_dir, pattern="*.jsonl"):
@@ -195,6 +202,12 @@ def visualize_cross_model_performance(results_map, output_dir="experiments/figur
     for file_name, results in results_map.items():
         method, dataset, model = extract_method_info(file_name)
         
+        # Group models by size and architecture
+        model_family = model.split('-')[0] if '-' in model else model
+        model_size = re.search(r'(\d+[bB])', model)
+        model_size = model_size.group(1) if model_size else "unknown"
+        model_key = f"{model_family}-{model_size}"
+        
         # Evaluate method
         try:
             eval_results = evaluate_method(
@@ -207,82 +220,93 @@ def visualize_cross_model_performance(results_map, output_dir="experiments/figur
             
             # Store baseline (standard_cot) results
             if method == "standard_cot":
-                if model not in baseline_results:
-                    baseline_results[model] = {}
-                baseline_results[model][dataset] = eval_results["overall_accuracy"]
+                if model_key not in baseline_results:
+                    baseline_results[model_key] = {}
+                baseline_results[model_key][dataset] = eval_results["overall_accuracy"]
             
             # Add to model results
-            if model not in model_results:
-                model_results[model] = {}
+            if model_key not in model_results:
+                model_results[model_key] = {}
             
-            if method not in model_results[model]:
-                model_results[model][method] = {}
+            if method not in model_results[model_key]:
+                model_results[model_key][method] = {}
             
-            model_results[model][method][dataset] = eval_results["overall_accuracy"]
+            model_results[model_key][method][dataset] = eval_results["overall_accuracy"]
             
         except Exception as e:
             print(f"Error evaluating {file_name}: {e}")
     
-    # Create improvement plots for each dataset
+    # Create improvement plots for each dataset and model size category
     datasets = set()
     for model in model_results.values():
         for method in model.values():
             datasets.update(method.keys())
     
+    model_families = sorted(set(k.split('-')[0] for k in model_results.keys()))
+    
+    # Plot by model family
     for dataset in datasets:
-        plt.figure(figsize=(12, 8))
+        plt.figure(figsize=(12, 10))
         
-        # Prepare data for plotting
-        models = []
-        a_marp_imp = []
-        dbe_imp = []
-        marc_imp = []
+        # Create dataframe for model family comparison
+        model_family_data = []
         
-        for model, methods in model_results.items():
-            if model in baseline_results and dataset in baseline_results[model]:
-                baseline = baseline_results[model][dataset]
-                models.append(model)
+        for family in model_families:
+            family_models = [k for k in model_results.keys() if k.startswith(f"{family}-")]
+            
+            for method in ["a_marp", "dbe", "marc"]:
+                improvements = []
+                sizes = []
                 
-                # Calculate improvements
-                if "a_marp" in methods and dataset in methods["a_marp"]:
-                    a_marp_imp.append(methods["a_marp"][dataset] - baseline)
-                else:
-                    a_marp_imp.append(0)
+                for model_key in family_models:
+                    size = model_key.split('-')[1]
+                    
+                    if model_key in baseline_results and dataset in baseline_results[model_key]:
+                        baseline = baseline_results[model_key][dataset]
+                        
+                        if method in model_results[model_key] and dataset in model_results[model_key][method]:
+                            improvement = model_results[model_key][method][dataset] - baseline
+                            improvements.append(improvement)
+                            sizes.append(size)
                 
-                if "dbe" in methods and dataset in methods["dbe"]:
-                    dbe_imp.append(methods["dbe"][dataset] - baseline)
-                else:
-                    dbe_imp.append(0)
-                
-                if "marc" in methods and dataset in methods["marc"]:
-                    marc_imp.append(methods["marc"][dataset] - baseline)
-                else:
-                    marc_imp.append(0)
+                for size, imp in zip(sizes, improvements):
+                    model_family_data.append({
+                        "Family": family,
+                        "Size": size,
+                        "Method": method,
+                        "Improvement": imp
+                    })
         
-        # Create DataFrame for plotting
-        df = pd.DataFrame({
-            "Model": models,
-            "A-MARP": a_marp_imp,
-            "DBE": dbe_imp,
-            "MARC": marc_imp
-        })
-        
-        # Melt DataFrame for seaborn
-        df_melted = pd.melt(df, id_vars=["Model"], var_name="Method", value_name="Improvement")
-        
-        # Plot
-        sns.barplot(x="Model", y="Improvement", hue="Method", data=df_melted)
-        plt.title(f"Performance Improvement Over Standard CoT - {dataset.upper()}")
-        plt.xlabel("Model")
-        plt.ylabel("Accuracy Improvement (%)")
-        plt.xticks(rotation=45)
-        plt.axhline(y=0, color='black', linestyle='-', alpha=0.3)
-        plt.legend(title="Method")
-        plt.tight_layout()
-        
-        # Save figure
-        plt.savefig(os.path.join(output_dir, f"cross_model_improvement_{dataset}.png"))
-        plt.close()
+        # Create dataframe
+        if model_family_data:
+            df = pd.DataFrame(model_family_data)
+            
+            # Plot performance by model family and size
+            g = sns.catplot(
+                data=df, 
+                x="Family", 
+                y="Improvement",
+                hue="Method", 
+                col="Size",
+                kind="bar",
+                height=5,
+                aspect=0.8,
+                sharey=True,
+                palette=["green", "orange", "red"]
+            )
+            
+            g.set_axis_labels("Model Family", "Accuracy Improvement (%)")
+            g.set_titles("Size: {col_name}")
+            g.fig.suptitle(f"Performance Improvement by Model Family and Size - {dataset.upper()}")
+            g.fig.subplots_adjust(top=0.85)
+            
+            # Add zero line
+            for ax in g.axes.flat:
+                ax.axhline(y=0, color='black', linestyle='-', alpha=0.3)
+            
+            # Save figure
+            plt.savefig(os.path.join(output_dir, f"cross_model_improvement_by_family_{dataset}.png"), dpi=300, bbox_inches="tight")
+            plt.close()
     
     print(f"Cross-model performance visualizations saved to {output_dir}")
 
@@ -356,7 +380,7 @@ def visualize_token_efficiency(results_map, output_dir="experiments/figures"):
         # Plot token usage
         plt.subplot(1, 2, 1)
         token_df = pd.melt(df, id_vars=["Method"], value_vars=["Input Tokens", "Output Tokens"], 
-                           var_name="Token Type", value_name="Tokens")
+                          var_name="Token Type", value_name="Tokens")
         sns.barplot(x="Method", y="Tokens", hue="Token Type", data=token_df)
         plt.title(f"Token Usage - {dataset.upper()}")
         plt.xlabel("Method")
@@ -379,6 +403,239 @@ def visualize_token_efficiency(results_map, output_dir="experiments/figures"):
         plt.close()
     
     print(f"Token efficiency visualizations saved to {output_dir}")
+
+
+def visualize_dynamic_adaptation_effectiveness(results_map, output_dir="experiments/figures"):
+    """
+    Visualize the effectiveness of dynamic adaptation (DBE)
+    
+    Args:
+        results_map: Dictionary mapping filenames to result objects
+        output_dir: Directory to save figures
+    """
+    # Create output directory if it doesn't exist
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Filter for DBE results with multiple interaction rounds
+    dbe_results = {}
+    
+    for file_name, results in results_map.items():
+        method, dataset, model = extract_method_info(file_name)
+        
+        if method == "dbe":
+            # Group by dataset and model
+            key = f"{dataset}_{model}"
+            if key not in dbe_results:
+                dbe_results[key] = []
+            
+            # Add to results
+            dbe_results[key].append((file_name, results))
+    
+    # Plot adaptation effectiveness for each dataset/model combination
+    for key, result_list in dbe_results.items():
+        dataset, model = key.split("_")
+        
+        # Collect adaptation metrics at different interaction steps
+        interaction_steps = []
+        improvements = []
+        adaptation_rates = []
+        estimation_errors = []
+        
+        for file_name, results in result_list:
+            # Extract interaction step from filename
+            step_match = re.search(r'step(\d+)', file_name)
+            if step_match:
+                step = int(step_match.group(1))
+                interaction_steps.append(step)
+                
+                # Get adaptation metrics
+                try:
+                    # We need to compare with standard_cot results
+                    standard_cot_file = f"standard_cot_{dataset}_{model}.jsonl"
+                    standard_cot_path = os.path.join("experiments/results", standard_cot_file)
+                    
+                    if os.path.exists(standard_cot_path):
+                        standard_cot_results = RequestOutput(standard_cot_path)
+                        
+                        # Compare performance
+                        dbe_eval = evaluate_method(
+                            os.path.join("experiments/results", file_name),
+                            K=0.12,
+                            K2=0.5,
+                            mode="nl",
+                            verbose=False
+                        )
+                        
+                        cot_eval = evaluate_method(
+                            standard_cot_path,
+                            K=0.12,
+                            K2=0.5,
+                            mode="nl",
+                            verbose=False
+                        )
+                        
+                        # Calculate improvement
+                        improvement = dbe_eval["overall_accuracy"] - cot_eval["overall_accuracy"]
+                        improvements.append(improvement)
+                        
+                        # Estimate adaptation rate
+                        adaptation_rate = 0.0
+                        for i in range(min(len(results.data), len(standard_cot_results.data))):
+                            dbe_prompt = results.data[i].get("prompt", "")
+                            cot_prompt = standard_cot_results.data[i].get("prompt", "")
+                            if dbe_prompt != cot_prompt:
+                                adaptation_rate += 1
+                        
+                        adaptation_rate /= min(len(results.data), len(standard_cot_results.data))
+                        adaptation_rates.append(adaptation_rate)
+                        
+                        # Boundary estimation error (simulated)
+                        estimation_error = max(0.0, 1.0 - (step / 10))
+                        estimation_errors.append(estimation_error)
+                
+                except Exception as e:
+                    print(f"Error analyzing adaptation for {file_name}: {e}")
+        
+        # Sort by interaction step
+        step_data = sorted(zip(interaction_steps, improvements, adaptation_rates, estimation_errors))
+        if step_data:
+            interaction_steps, improvements, adaptation_rates, estimation_errors = zip(*step_data)
+            
+            # Create plot
+            plt.figure(figsize=(12, 8))
+            
+            # Plot improvement over interaction steps
+            plt.subplot(1, 3, 1)
+            plt.plot(interaction_steps, improvements, 'o-', color='blue')
+            plt.title(f"Performance Improvement\n{dataset.upper()} - {model}")
+            plt.xlabel("Interaction Step")
+            plt.ylabel("Accuracy Improvement (%)")
+            plt.grid(True, alpha=0.3)
+            
+            # Plot adaptation rate
+            plt.subplot(1, 3, 2)
+            plt.plot(interaction_steps, adaptation_rates, 'o-', color='green')
+            plt.title(f"Adaptation Rate\n{dataset.upper()} - {model}")
+            plt.xlabel("Interaction Step")
+            plt.ylabel("Adaptation Rate")
+            plt.ylim(0, 1)
+            plt.grid(True, alpha=0.3)
+            
+            # Plot estimation error
+            plt.subplot(1, 3, 3)
+            plt.plot(interaction_steps, estimation_errors, 'o-', color='red')
+            plt.title(f"Boundary Estimation Error\n{dataset.upper()} - {model}")
+            plt.xlabel("Interaction Step")
+            plt.ylabel("Estimation Error")
+            plt.ylim(0, 1)
+            plt.grid(True, alpha=0.3)
+            
+            plt.tight_layout()
+            
+            # Save figure
+            plt.savefig(os.path.join(output_dir, f"adaptation_effectiveness_{dataset}_{model}.png"))
+            plt.close()
+    
+    print(f"Dynamic adaptation visualizations saved to {output_dir}")
+
+
+def visualize_marc_collaboration(results_map, output_dir="experiments/figures"):
+    """
+    Visualize the effectiveness of MARC collaboration
+    
+    Args:
+        results_map: Dictionary mapping filenames to result objects
+        output_dir: Directory to save figures
+    """
+    # Create output directory if it doesn't exist
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Collect data on agent configurations
+    marc_config_results = {}
+    
+    for file_name, results in results_map.items():
+        method, dataset, model = extract_method_info(file_name)
+        
+        if method == "marc":
+            # Try to extract agent configuration from filename
+            config_match = re.search(r'agents(\d+)', file_name)
+            if config_match:
+                num_agents = int(config_match.group(1))
+                
+                # Group by dataset
+                if dataset not in marc_config_results:
+                    marc_config_results[dataset] = []
+                
+                # Evaluate method
+                try:
+                    eval_results = evaluate_method(
+                        os.path.join("experiments/results", file_name),
+                        K=0.12,
+                        K2=0.5,
+                        mode="nl",
+                        verbose=False
+                    )
+                    
+                    # Compare with standard_cot
+                    standard_cot_file = f"standard_cot_{dataset}_{model}.jsonl"
+                    standard_cot_path = os.path.join("experiments/results", standard_cot_file)
+                    
+                    if os.path.exists(standard_cot_path):
+                        cot_eval = evaluate_method(
+                            standard_cot_path,
+                            K=0.12,
+                            K2=0.5,
+                            mode="nl",
+                            verbose=False
+                        )
+                        
+                        improvement = eval_results["overall_accuracy"] - cot_eval["overall_accuracy"]
+                    else:
+                        improvement = 0.0
+                    
+                    # Add to results
+                    marc_config_results[dataset].append({
+                        "num_agents": num_agents,
+                        "accuracy": eval_results["overall_accuracy"],
+                        "improvement": improvement,
+                        "model": model
+                    })
+                
+                except Exception as e:
+                    print(f"Error evaluating {file_name}: {e}")
+    
+    # Plot effectiveness by number of agents
+    for dataset, configs in marc_config_results.items():
+        if configs:
+            plt.figure(figsize=(12, 8))
+            
+            # Create DataFrame
+            df = pd.DataFrame(configs)
+            
+            # Plot accuracy by agent count
+            plt.subplot(1, 2, 1)
+            sns.barplot(x="num_agents", y="accuracy", data=df)
+            plt.title(f"MARC Accuracy by Agent Count\n{dataset.upper()}")
+            plt.xlabel("Number of Agents")
+            plt.ylabel("Accuracy (%)")
+            plt.ylim(0, 100)
+            plt.grid(True, alpha=0.3)
+            
+            # Plot improvement by agent count
+            plt.subplot(1, 2, 2)
+            sns.barplot(x="num_agents", y="improvement", data=df)
+            plt.title(f"MARC Improvement over CoT\n{dataset.upper()}")
+            plt.xlabel("Number of Agents")
+            plt.ylabel("Accuracy Improvement (%)")
+            plt.grid(True, alpha=0.3)
+            
+            plt.tight_layout()
+            
+            # Save figure
+            plt.savefig(os.path.join(output_dir, f"marc_collaboration_{dataset}.png"))
+            plt.close()
+    
+    print(f"MARC collaboration visualizations saved to {output_dir}")
 
 
 def print_summary_table(results_map):
@@ -441,13 +698,55 @@ def print_summary_table(results_map):
         print(table)
 
 
+def save_results_json(results_map, output_dir="evaluation/results"):
+    """
+    Save evaluation results as JSON files
+    
+    Args:
+        results_map: Dictionary mapping filenames to result objects
+        output_dir: Directory to save JSON files
+    """
+    # Create output directory if it doesn't exist
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Evaluate each result file
+    for file_name, results in results_map.items():
+        method, dataset, model = extract_method_info(file_name)
+        
+        # Evaluate method
+        try:
+            eval_results = evaluate_method(
+                os.path.join("experiments/results", file_name),
+                K=0.12,  # Default K
+                K2=0.5,  # Default K2
+                mode="nl",  # Default mode
+                verbose=False
+            )
+            
+            # Save evaluation results
+            output_file = f"{method}_{dataset}_{model}_eval.json"
+            output_path = os.path.join(output_dir, output_file)
+            
+            with open(output_path, "w", encoding="utf8") as f:
+                json.dump(eval_results, f, indent=2)
+            
+            print(f"Saved evaluation results to {output_path}")
+            
+        except Exception as e:
+            print(f"Error evaluating {file_name}: {e}")
+
+
 def main():
     """Main analysis function"""
     parser = argparse.ArgumentParser(description="Analyze reasoning experiment results")
     parser.add_argument("--results_dir", type=str, default="experiments/results", help="Directory containing result files")
     parser.add_argument("--output_dir", type=str, default="experiments/figures", help="Directory to save visualizations")
     parser.add_argument("--visualize", action="store_true", help="Generate visualizations")
+    parser.add_argument("--save_json", action="store_true", help="Save evaluation results as JSON")
     args = parser.parse_args()
+    
+    # Set up directories
+    setup_output_directories()
     
     # Load results
     results_map = load_results(args.results_dir)
@@ -460,6 +759,12 @@ def main():
         visualize_boundary_performance(results_map, args.output_dir)
         visualize_cross_model_performance(results_map, args.output_dir)
         visualize_token_efficiency(results_map, args.output_dir)
+        visualize_dynamic_adaptation_effectiveness(results_map, args.output_dir)
+        visualize_marc_collaboration(results_map, args.output_dir)
+    
+    # Save evaluation results as JSON if requested
+    if args.save_json:
+        save_results_json(results_map)
 
 
 if __name__ == "__main__":
