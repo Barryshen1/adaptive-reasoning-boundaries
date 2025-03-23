@@ -1,0 +1,249 @@
+"""
+Evaluation script for reasoning methods
+"""
+import argparse
+import os
+import json
+import numpy as np
+import tiktoken
+from prettytable import PrettyTable
+from tqdm import tqdm
+
+from utils.request_tool import RequestOutput
+from utils.tools import get_combined_granularity, categorize_boundary
+from evaluation.metrics import extract_answer, boundary_performance, token_efficiency
+
+
+# Parameter dictionary for different methods
+PARAM_DICT = {
+    "CoT": {
+        "K": 0.106,
+        "K2": 0.425,
+        "mode": "nl",
+        "result_path": "experiments/results/standard_cot.jsonl"
+    },
+    "A-MARP": {
+        "K": 0.12,
+        "K2": 0.53,
+        "mode": "nl",
+        "result_path": "experiments/results/a_marp.jsonl"
+    },
+    "DBE": {
+        "K": 0.13,
+        "K2": 0.81,
+        "mode": "nl",
+        "result_path": "experiments/results/dbe.jsonl"
+    },
+    "MARC": {
+        "K": 0.106,
+        "K2": 0.50,
+        "mode": "nl",
+        "result_path": "experiments/results/marc.jsonl"
+    }
+}
+
+
+def evaluate_method(result_path, K, K2, mode="nl", verbose=True):
+    """
+    Evaluate the performance of a reasoning method
+    
+    Args:
+        result_path: Path to results file
+        K: CFRB/PFRB threshold
+        K2: PFRB/CIRB threshold
+        mode: Evaluation mode
+        verbose: Whether to print detailed results
+        
+    Returns:
+        Evaluation metrics
+    """
+    # Check if file exists
+    if not os.path.exists(result_path):
+        raise FileNotFoundError(f"Results file not found: {result_path}")
+    
+    # Load results
+    response_list = RequestOutput(result_path)
+    
+    # Initialize statistics
+    token_num = 0
+    input_token_num = 0
+    enc = tiktoken.encoding_for_model("gpt-4")
+    acc = {">90%": {"correct": 0, "total": 0}, "10%~90%": {"correct": 0, "total": 0}, "<10%": {"correct": 0, "total": 0}}
+    
+    # Evaluate each result
+    for idx in tqdm(range(len(response_list)), desc="Evaluating", disable=not verbose):
+        # Calculate granularity
+        granularity = get_combined_granularity(response_list.get_origin_input(idx))
+        
+        # Count tokens
+        input_token_num += len(enc.encode(response_list.data[idx]["pred"][0]["content"][0]["text"]))
+        token_num += len(enc.encode(response_list.get_last_pred_text(idx)))
+        
+        # Determine boundary category
+        if granularity <= K:
+            granularity_key = ">90%"
+        elif granularity > K and granularity <= K2:
+            granularity_key = "10%~90%"
+        elif granularity > K2:
+            granularity_key = "<10%"
+            
+        # Check correctness
+        correct = response_list.judge_correct(idx, mode=mode)
+        if correct:
+            acc[granularity_key]["correct"] += 1
+        acc[granularity_key]["total"] += 1
+    
+    # Calculate overall statistics
+    total = sum(acc[key]["total"] for key in acc)
+    correct = sum(acc[key]["correct"] for key in acc)
+    
+    # Create results dictionary
+    results = {
+        "overall_accuracy": round(correct/total * 100, 2) if total > 0 else 0,
+        "avg_input_tokens": round(input_token_num/total, 2) if total > 0 else 0,
+        "avg_output_tokens": round(token_num/total, 2) if total > 0 else 0,
+        "boundary_performance": {}
+    }
+    
+    # Add boundary-specific accuracy
+    for key in acc:
+        if acc[key]["total"] > 0:
+            results["boundary_performance"][key] = {
+                "accuracy": round(acc[key]["correct"]/acc[key]["total"] * 100, 2),
+                "samples": acc[key]["total"]
+            }
+        else:
+            results["boundary_performance"][key] = {
+                "accuracy": "-",
+                "samples": 0
+            }
+    
+    # Print results table if verbose
+    if verbose:
+        table = PrettyTable()
+        table.field_names = ["Granularity", "Accuracy", "Samples", "Input Tokens", "Output Tokens"]
+        
+        for key in [">90%", "10%~90%", "<10%"]:
+            if acc[key]["total"] > 0:
+                table.add_row([
+                    key,
+                    f"{round(acc[key]['correct']/acc[key]['total'] * 100, 2)}%",
+                    acc[key]["total"],
+                    "-",
+                    "-"
+                ], divider=key == "<10%")
+            else:
+                table.add_row([
+                    key,
+                    "-",
+                    0,
+                    "-",
+                    "-"
+                ], divider=key == "<10%")
+                
+        table.add_row([
+            "All", 
+            f"{round(correct/total * 100, 2)}%" if total > 0 else "-", 
+            total,
+            round(input_token_num/total, 2) if total > 0 else "-", 
+            round(token_num/total, 2) if total > 0 else "-"
+        ])
+        
+        print(table)
+    
+    return results
+
+
+def compare_methods(methods, dataset_name=None, verbose=True):
+    """
+    Compare multiple reasoning methods
+    
+    Args:
+        methods: List of method names
+        dataset_name: Dataset name for display
+        verbose: Whether to print detailed results
+        
+    Returns:
+        Comparison results
+    """
+    results = {}
+    
+    for method in methods:
+        if method not in PARAM_DICT:
+            print(f"Warning: Unknown method {method}. Skipping.")
+            continue
+        
+        params = PARAM_DICT[method]
+        try:
+            method_results = evaluate_method(
+                params["result_path"],
+                params["K"],
+                params["K2"],
+                params["mode"],
+                verbose=False
+            )
+            results[method] = method_results
+        except FileNotFoundError as e:
+            print(f"Error evaluating {method}: {e}")
+    
+    if verbose and results:
+        # Print comparison table
+        table = PrettyTable()
+        table.field_names = ["Method", "Overall Accuracy", "CFRB Accuracy", "PFRB Accuracy", "CIRB Accuracy", "Avg. Tokens"]
+        
+        for method, res in results.items():
+            table.add_row([
+                method,
+                f"{res['overall_accuracy']}%",
+                f"{res['boundary_performance']['>90%']['accuracy']}%" if res['boundary_performance']['>90%']['accuracy'] != '-' else '-',
+                f"{res['boundary_performance']['10%~90%']['accuracy']}%" if res['boundary_performance']['10%~90%']['accuracy'] != '-' else '-',
+                f"{res['boundary_performance']['<10%']['accuracy']}%" if res['boundary_performance']['<10%']['accuracy'] != '-' else '-',
+                res['avg_input_tokens'] + res['avg_output_tokens']
+            ])
+        
+        print(f"\nResults for {dataset_name or 'all datasets'}:")
+        print(table)
+    
+    return results
+
+
+def main():
+    """Main evaluation function"""
+    parser = argparse.ArgumentParser(description="Evaluate reasoning methods")
+    parser.add_argument("--method", type=str, default="all", help="Method to evaluate (all, CoT, A-MARP, DBE, MARC)")
+    parser.add_argument("--result_path", type=str, help="Custom result path")
+    parser.add_argument("--K", type=float, help="Custom K threshold")
+    parser.add_argument("--K2", type=float, help="Custom K2 threshold")
+    parser.add_argument("--mode", type=str, default="nl", help="Evaluation mode (nl, tool, pot)")
+    parser.add_argument("--dataset", type=str, help="Dataset name for display")
+    args = parser.parse_args()
+    
+    if args.method.lower() == "all":
+        compare_methods(["CoT", "A-MARP", "DBE", "MARC"], args.dataset)
+    elif args.method in PARAM_DICT:
+        params = PARAM_DICT[args.method]
+        evaluate_method(
+            params["result_path"],
+            params["K"],
+            params["K2"],
+            params["mode"]
+        )
+    else:
+        # Custom evaluation
+        if not args.result_path:
+            raise ValueError("Must provide --result_path for custom evaluation")
+        if not args.K:
+            raise ValueError("Must provide --K for custom evaluation")
+        if not args.K2:
+            raise ValueError("Must provide --K2 for custom evaluation")
+        
+        evaluate_method(
+            args.result_path,
+            args.K,
+            args.K2,
+            args.mode
+        )
+
+
+if __name__ == "__main__":
+    main()
