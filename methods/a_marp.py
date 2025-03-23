@@ -1,6 +1,7 @@
 """
 Implementation of Advanced Minimum Acceptable Reasoning Paths (A-MARP)
 """
+import re
 import numpy as np
 
 
@@ -59,8 +60,12 @@ class AMARP:
             'gpt-3.5-turbo': 220000,
             'gpt-4': 1000000,
             'claude-3-opus': 800000,
+            'claude-3.7-sonnet': 900000,
             'llama-3-70b': 150000,
             'o1-preview': 2000000,
+            'gpt-4.5-orion': 2500000,
+            'gpt-o3': 1800000,
+            'gpt-o1': 1600000,
         }
         
         return boundary_values.get(model, 220000)
@@ -84,8 +89,12 @@ class AMARP:
             'gpt-3.5-turbo': 7.0,
             'gpt-4': 12.0,
             'claude-3-opus': 10.0,
+            'claude-3.7-sonnet': 11.0,
             'llama-3-70b': 5.0,
             'o1-preview': 15.0,
+            'gpt-4.5-orion': 18.0,
+            'gpt-o3': 14.0,
+            'gpt-o1': 13.0,
         }
         
         return boundary_values.get(model, 7.0)
@@ -155,15 +164,25 @@ class AMARP:
         Returns:
             Task type identifier
         """
-        # Placeholder implementation - would use actual NLP techniques in practice
-        if "math" in task.lower() or any(keyword in task.lower() for keyword in ["calculate", "solve", "equation"]):
+        # Check for mathematical content
+        math_keywords = ["calculate", "solve", "equation", "math", "arithmetic", "compute", 
+                         "number", "formula", "sum", "product", "division"]
+        if any(keyword in task.lower() for keyword in math_keywords) or re.search(r'\d+[\+\-\*\/]\d+', task):
             return "mathematical"
-        elif any(keyword in task.lower() for keyword in ["logical", "deduce", "infer"]):
+        
+        # Check for logical reasoning content
+        logical_keywords = ["logical", "deduce", "infer", "conclude", "premise", "argument", 
+                           "valid", "invalid", "syllogism", "if-then"]
+        if any(keyword in task.lower() for keyword in logical_keywords):
             return "logical"
-        elif any(keyword in task.lower() for keyword in ["compare", "contrast", "analyze"]):
+        
+        # Check for analytical content
+        analytical_keywords = ["compare", "contrast", "analyze", "evaluate", "assess", 
+                              "critique", "examine", "review", "study"]
+        if any(keyword in task.lower() for keyword in analytical_keywords):
             return "analytical"
-        else:
-            return "general"
+        
+        return "general"
     
     def _calculate_context_factor(self, task_type):
         """
@@ -196,9 +215,25 @@ class AMARP:
             Updated memory state
         """
         step_id = f"step_{len(self.memory) + 1}"
+        
+        # Track dependencies between steps
+        dependencies = []
+        for prev_step_id, prev_step in self.memory.items():
+            # Check if current step depends on previous steps
+            if any(term in step for term in prev_step.get("result_terms", [])):
+                dependencies.append(prev_step_id)
+        
+        # Extract key terms from the result
+        if isinstance(result, str):
+            result_terms = list(set(re.findall(r'\b\w+\b', result)))
+        else:
+            result_terms = []
+        
         self.memory[step_id] = {
             "step": step,
             "result": result,
+            "result_terms": result_terms,
+            "dependencies": dependencies,
             "timestamp": len(self.memory)
         }
         
