@@ -2,6 +2,8 @@
 Implementation of Multi-Agent Reasoning Collaboration (MARC)
 """
 import numpy as np
+import json
+import re
 from collections import defaultdict
 
 
@@ -32,6 +34,7 @@ class MARC:
         self.solution_components = {}  # Partial solutions by subtask
         self.communication_history = []  # Record of agent communications
         self.consensus_votes = defaultdict(dict)  # Votes on critical decisions
+        self.subtasks = []  # List of all subtasks
     
     def add_agent(self, agent_id, agent_type, boundary_profile, model_name=None):
         """
@@ -158,11 +161,16 @@ class MARC:
         task_type = self._identify_task_type(task)
         
         if task_type == "mathematical":
-            return self._decompose_mathematical_task(task)
+            subtasks = self._decompose_mathematical_task(task)
         elif task_type == "logical":
-            return self._decompose_logical_task(task)
+            subtasks = self._decompose_logical_task(task)
         else:
-            return self._decompose_general_task(task)
+            subtasks = self._decompose_general_task(task)
+            
+        # Save subtasks for future reference
+        self.subtasks = subtasks
+        
+        return subtasks
     
     def _identify_task_type(self, task):
         """
@@ -177,9 +185,9 @@ class MARC:
         # In a real implementation, this would use NLP techniques
         # For this template, we'll use a simple keyword-based approach
         
-        if any(keyword in task.lower() for keyword in ["calculate", "compute", "math", "equation"]):
+        if any(keyword in task.lower() for keyword in ["calculate", "compute", "math", "equation", "solve", "arithmetic"]):
             return "mathematical"
-        elif any(keyword in task.lower() for keyword in ["logic", "deduce", "infer", "prove"]):
+        elif any(keyword in task.lower() for keyword in ["logic", "deduce", "infer", "prove", "conclude", "syllogism"]):
             return "logical"
         else:
             return "general"
@@ -526,48 +534,91 @@ class MARC:
         
         return assistance_plan
     
-    def collect_votes(self, subtask_id, question, options):
+    def _calculate_agent_confidence(self, agent_id, subtask_id):
         """
-        Collect votes from agents for consensus decision
+        Calculate agent's confidence for a specific subtask
         
         Args:
-            subtask_id: Subtask ID the decision relates to
-            question: Decision question
-            options: Possible options
+            agent_id: Agent ID
+            subtask_id: Subtask ID
             
         Returns:
-            Voting results
+            Confidence score (0-1)
         """
-        votes = {}
+        # Get agent boundaries
+        agent = self.agents.get(agent_id, {})
+        boundaries = agent.get("boundaries", {})
         
-        for agent_id, agent in self.agents.items():
-            # Simulate agent voting based on their boundary strengths
-            # In a real implementation, agents would vote based on their reasoning
-            
-            # Weight agent's vote based on their relevant boundaries
-            boundaries = agent["boundaries"]
-            weight = sum(boundaries.values()) / len(boundaries) if boundaries else 1.0
-            
-            # Simulate preference (would be based on actual agent reasoning)
-            preference = np.random.choice(options)
-            
-            votes[agent_id] = {
-                "option": preference,
-                "weight": weight,
-                "confidence": np.random.uniform(0.6, 0.9)
-            }
-            
-            # Record in consensus votes
-            self.consensus_votes[subtask_id][agent_id] = votes[agent_id]
+        # Get subtask
+        subtask = next((s for s in self.subtasks if s["id"] == subtask_id), None)
+        if not subtask:
+            return 0.5  # Default confidence
         
-        return votes
+        # Get subtask difficulty
+        difficulty = self.estimate_task_difficulty(subtask)
+        
+        # Calculate confidence based on boundary vs difficulty
+        confidence = 0.5  # Base confidence
+        for dim, diff in difficulty.items():
+            if dim in boundaries:
+                # Higher boundary relative to difficulty means higher confidence
+                boundary_ratio = boundaries[dim] / (diff + 0.001)  # Avoid division by zero
+                if boundary_ratio > 1.5:
+                    confidence += 0.2
+                elif boundary_ratio > 1.0:
+                    confidence += 0.1
+                elif boundary_ratio < 0.7:
+                    confidence -= 0.2
+        
+        # Clamp confidence to 0.1-0.9 range
+        return max(0.1, min(0.9, confidence))
     
-    def reach_consensus(self, subtask_id):
+    def _get_vote_probabilities(self, agent_id, options):
+        """
+        Get probability distribution for agent's vote
+        
+        Args:
+            agent_id: Agent ID
+            options: List of options
+            
+        Returns:
+            Probability distribution
+        """
+        # In a real implementation, this would be based on agent's reasoning
+        # For this template, simulate a skewed distribution
+        n_options = len(options)
+        agent_type = self.agents.get(agent_id, {}).get("type", "")
+        
+        if agent_type == "calculator":
+            # Calculator prefers systematic approaches
+            probs = np.array([0.1, 0.4, 0.2, 0.3])
+        elif agent_type == "planner":
+            # Planner prefers structured approaches
+            probs = np.array([0.2, 0.1, 0.5, 0.2])
+        elif agent_type == "verifier":
+            # Verifier prefers conservative approaches
+            probs = np.array([0.3, 0.2, 0.1, 0.4])
+        else:
+            # Default uniform distribution
+            probs = np.ones(4) / 4
+        
+        # Pad or truncate to match number of options
+        if len(probs) < n_options:
+            probs = np.pad(probs, (0, n_options - len(probs)), 'constant', constant_values=(0.1,))
+        elif len(probs) > n_options:
+            probs = probs[:n_options]
+        
+        # Normalize
+        return probs / probs.sum()
+    
+    def reach_consensus(self, subtask_id, question, options):
         """
         Reach consensus through weighted voting
         
         Args:
             subtask_id: Subtask ID the consensus relates to
+            question: The decision question
+            options: Possible options
             
         Returns:
             Consensus decision
@@ -575,9 +626,36 @@ class MARC:
         votes = self.consensus_votes.get(subtask_id, {})
         
         if not votes:
-            return None
+            # Get votes from agents
+            for agent_id, agent in self.agents.items():
+                # Calculate weight based on boundary alignment with task
+                subtask = next((s for s in self.subtasks if s["id"] == subtask_id), None)
+                if subtask:
+                    difficulty = self.estimate_task_difficulty(subtask)
+                    alignment = self.measure_boundary_alignment(agent["boundaries"], difficulty)
+                    weight = max(0.1, alignment)  # Minimum weight to ensure all agents have some voice
+                else:
+                    weight = 1.0  # Default weight
+                
+                # Confidence based on agent's capability profile
+                confidence = self._calculate_agent_confidence(agent_id, subtask_id)
+                
+                # Get agent's vote on the question
+                # In a real implementation, this would call the agent's model
+                # For this template, simulate a vote
+                preference_idx = np.random.choice(len(options), p=self._get_vote_probabilities(agent_id, options))
+                preference = options[preference_idx]
+                
+                votes[agent_id] = {
+                    "option": preference,
+                    "weight": weight,
+                    "confidence": confidence
+                }
+                
+                # Record in consensus votes
+                self.consensus_votes[subtask_id] = votes
         
-        # Tally weighted votes
+        # Tally weighted votes according to equation (15) in the paper
         option_scores = defaultdict(float)
         
         for agent_id, vote in votes.items():
@@ -585,16 +663,19 @@ class MARC:
             weight = vote["weight"]
             confidence = vote["confidence"]
             
-            # Weight by both agent weight and confidence
+            # Weight by both agent weight and confidence as per equation (15)
             option_scores[option] += weight * confidence
         
         # Find option with highest score
         if option_scores:
             consensus = max(option_scores.items(), key=lambda x: x[1])
+            total_score = sum(option_scores.values())
+            
             return {
                 "option": consensus[0],
                 "score": consensus[1],
-                "agreement_level": consensus[1] / sum(option_scores.values())
+                "agreement_level": consensus[1] / total_score if total_score > 0 else 0,
+                "vote_distribution": {k: v / total_score for k, v in option_scores.items()} if total_score > 0 else {}
             }
         
         return None
@@ -789,23 +870,22 @@ class MARC:
                             "Provide partial solution with caveats"
                         ]
                         
-                        votes = self.collect_votes(subtask_id, 
+                        votes = self.reach_consensus(subtask_id, 
                                                   f"How to handle subtask {subtask_id} that exceeded boundaries?", 
                                                   options)
                         
-                        consensus = self.reach_consensus(subtask_id)
-                        action_record["consensus"] = consensus
+                        action_record["consensus"] = votes
                         
                         # Apply consensus decision
-                        if consensus:
+                        if votes:
                             # Simulate resolution based on consensus
                             fallback_result = {
                                 "status": "completed_with_limitations",
                                 "subtask_id": subtask_id,
                                 "agent_id": agent_id,
-                                "result": f"Completed with limitations ({consensus['option']}): {subtask['description']}",
+                                "result": f"Completed with limitations ({votes['option']}): {subtask['description']}",
                                 "confidence": 0.6,
-                                "message": f"Task completed using consensus approach: {consensus['option']}"
+                                "message": f"Task completed using consensus approach: {votes['option']}"
                             }
                             
                             self.solution_components[subtask_id] = fallback_result
