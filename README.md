@@ -57,84 +57,49 @@ pip install -r requirements.txt
 
 ## 🚀 Running Experiments
 
-### A-MARP
+Set up your API keys (for OpenAI or Anthropic)
 
 ```bash
-python run_amarp.py --dataset GSM8K \
-                    --model gpt-4 \
-                    --alpha 0.15 \
-                    --beta 0.08 \
-                    --c_max 5 \
-                    --output_dir results/amarp
+# For OpenAI
+export OPENAI_API_KEY=your_api_key_here
+
+# For Anthropic
+export ANTHROPIC_API_KEY=your_api_key_here
 ```
 
-### DBE
+### Run experiments with different methods
 
 ```bash
-python run_dbe.py --dataset BIGGSM \
-                 --model gpt-4 \
-                 --gamma 0.12 \
-                 --probe_frequency 5 \
-                 --probe_size 7 \
-                 --output_dir results/dbe
-```
+# Run A-MARP on GSM8K with GPT-4
+python run_experiments.py --method a_marp --dataset gsm8k --model gpt-4 --sample_size 50
 
-### MARC
+# Run DBE on GSM8K with GPT-4
+python run_experiments.py --method dbe --dataset gsm8k --model gpt-4 --sample_size 50
 
-```bash
-python run_marc.py --dataset HotpotQA \
-                  --models gpt-4,claude-3.5-sonnet,llama-3.1-70b \
-                  --agent_roles planner,calculator,verifier,integrator \
-                  --communication_rounds 5 \
-                  --output_dir results/marc
-```
+# Run MARC on GSM8K with GPT-4
+python run_experiments.py --method marc --dataset gsm8k --model gpt-4 --sample_size 50
 
-### Running All Methods
-
-```bash
-python run_all.py --dataset GSM8K \
-                 --model gpt-4 \
-                 --output_dir results/all
+# Run standard CoT baseline on GSM8K with GPT-4
+python run_experiments.py --method standard_cot --dataset gsm8k --model gpt-4 --sample_size 50
 ```
 
 ## 📈 Evaluation
 
-To evaluate the performance of our methods:
+Evaluate results:
 
 ```bash
-python evaluate.py --results_dir results/amarp \
-                   --metrics accuracy,boundary_error,token_efficiency \
-                   --visualize
+# Evaluate a specific method
+python evaluation/evaluate.py --method A-MARP
+
+# Compare all methods
+python evaluation/evaluate.py --method all --dataset gsm8k
 ```
 
-For ablation studies:
+Analyze and visualize results:
 
 ```bash
-python ablation.py --method amarp \
-                   --components adaptive_step,difficulty_aware,contextual_boundary,memory_augmented \
-                   --dataset BIGGSM \
-                   --model gpt-4
-```
-
-## 📊 Analysis
-
-### Visualization
-
-Generate performance comparison plots:
-
-```bash
-python visualize.py --results_dir results \
-                    --plot boundary_performance,cross_model,difficulty_analysis \
-                    --output_dir figures
-```
-
-### Reports
-
-Generate detailed analysis reports:
-
-```bash
-python generate_report.py --results_dir results \
-                          --output_file report.md
+# Generate visualizations
+python analyze_results.py --visualize
 ```
 
 ## 🧪 Experimental Results
