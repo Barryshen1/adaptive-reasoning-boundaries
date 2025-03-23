@@ -14,6 +14,6 @@ Chain-of-Thought (CoT) reasoning has significantly enhanced the performance of l
 ## Installation
 
 ```bash
-git clone https://github.com/yourusername/adaptive-reasoning-boundaries.git
+git clone https://github.com/Barryshen1/adaptive-reasoning-boundaries.git
 cd adaptive-reasoning-boundaries
 pip install -r requirements.txt
