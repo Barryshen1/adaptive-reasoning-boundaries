@@ -155,21 +155,36 @@ Key strengths of our approaches:
 
 ```
 adaptive-reasoning-boundaries/
-├── datasets/                 # Dataset processing and loading
-├── methods/                  # Implementation of our methods
-│   ├── amarp/                # Advanced MARP implementation
-│   ├── dbe/                  # Dynamic Boundary Estimation
-│   └── marc/                 # Multi-Agent Reasoning Collaboration
-├── baseline/                 # Baseline methods implementation
-├── evaluation/               # Evaluation metrics and utilities
-├── utils/                    # Common utilities
-├── scripts/                  # Helper scripts
-├── results/                  # Experimental results
-├── figures/                  # Generated figures
-├── configs/                  # Configuration files
-├── tests/                    # Unit tests
-├── requirements.txt          # Dependencies
-└── README.md                 # This file
+├── README.md
+├── requirements.txt
+├── methods/
+│   ├── __init__.py
+│   ├── a_marp.py
+│   ├── dbe.py
+│   └── marc.py
+├── data/
+│   ├── __init__.py
+│   └── loaders/
+│       ├── __init__.py
+│       └── dataset_loaders.py
+├── evaluation/
+│   ├── __init__.py
+│   ├── metrics.py
+│   └── evaluate.py
+├── experiments/
+│   ├── __init__.py
+│   ├── configs/
+│   │   ├── a_marp_config.py
+│   │   ├── dbe_config.py
+│   │   └── marc_config.py
+│   └── results/
+├── utils/
+│   ├── __init__.py
+│   ├── data.py
+│   ├── tools.py
+│   └── request_tool.py
+├── run_experiments.py
+└── analyze_results.py
 ```
 
 ## 📚 Citation
