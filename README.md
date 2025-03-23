@@ -1,5 +1,3 @@
-# Adaptive Optimization Methods for Reasoning Boundaries
-
 <p align="center">
 <h1 align="center">Adaptive Optimization Methods for Reasoning Boundaries: Dynamic Estimation and Multi-Agent Collaboration</h1>
 </p>
