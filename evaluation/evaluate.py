@@ -12,33 +12,34 @@ from tqdm import tqdm
 from utils.request_tool import RequestOutput
 from utils.tools import get_combined_granularity, categorize_boundary
 from evaluation.metrics import extract_answer, boundary_performance, token_efficiency
+from evaluation.metrics import adaptation_effectiveness, reasoning_path_quality
 
 
 # Parameter dictionary for different methods
 PARAM_DICT = {
-    "CoT": {
+    "standard_cot": {
         "K": 0.106,
         "K2": 0.425,
         "mode": "nl",
-        "result_path": "experiments/results/standard_cot.jsonl"
+        "result_path": "experiments/results/standard_cot_{dataset}_{model}.jsonl"
     },
-    "A-MARP": {
+    "a_marp": {
         "K": 0.12,
         "K2": 0.53,
         "mode": "nl",
-        "result_path": "experiments/results/a_marp.jsonl"
+        "result_path": "experiments/results/a_marp_{dataset}_{model}.jsonl"
     },
-    "DBE": {
+    "dbe": {
         "K": 0.13,
         "K2": 0.81,
         "mode": "nl",
-        "result_path": "experiments/results/dbe.jsonl"
+        "result_path": "experiments/results/dbe_{dataset}_{model}.jsonl"
     },
-    "MARC": {
+    "marc": {
         "K": 0.106,
         "K2": 0.50,
         "mode": "nl",
-        "result_path": "experiments/results/marc.jsonl"
+        "result_path": "experiments/results/marc_{dataset}_{model}.jsonl"
     }
 }
 
@@ -72,26 +73,30 @@ def evaluate_method(result_path, K, K2, mode="nl", verbose=True):
     
     # Evaluate each result
     for idx in tqdm(range(len(response_list)), desc="Evaluating", disable=not verbose):
-        # Calculate granularity
-        granularity = get_combined_granularity(response_list.get_origin_input(idx))
-        
-        # Count tokens
-        input_token_num += len(enc.encode(response_list.data[idx]["pred"][0]["content"][0]["text"]))
-        token_num += len(enc.encode(response_list.get_last_pred_text(idx)))
-        
-        # Determine boundary category
-        if granularity <= K:
-            granularity_key = ">90%"
-        elif granularity > K and granularity <= K2:
-            granularity_key = "10%~90%"
-        elif granularity > K2:
-            granularity_key = "<10%"
+        try:
+            # Calculate granularity
+            granularity = get_combined_granularity(response_list.get_origin_input(idx))
             
-        # Check correctness
-        correct = response_list.judge_correct(idx, mode=mode)
-        if correct:
-            acc[granularity_key]["correct"] += 1
-        acc[granularity_key]["total"] += 1
+            # Count tokens
+            input_token_num += len(enc.encode(response_list.data[idx]["pred"][0]["content"][0]["text"]))
+            token_num += len(enc.encode(response_list.get_last_pred_text(idx)))
+            
+            # Determine boundary category
+            if granularity <= K:
+                granularity_key = ">90%"
+            elif granularity > K and granularity <= K2:
+                granularity_key = "10%~90%"
+            elif granularity > K2:
+                granularity_key = "<10%"
+                
+            # Check correctness
+            correct = response_list.judge_correct(idx, mode=mode)
+            if correct:
+                acc[granularity_key]["correct"] += 1
+            acc[granularity_key]["total"] += 1
+        except Exception as e:
+            if verbose:
+                print(f"Error evaluating result {idx}: {e}")
     
     # Calculate overall statistics
     total = sum(acc[key]["total"] for key in acc)
@@ -154,13 +159,14 @@ def evaluate_method(result_path, K, K2, mode="nl", verbose=True):
     return results
 
 
-def compare_methods(methods, dataset_name=None, verbose=True):
+def compare_methods(methods, dataset_name, model_name, verbose=True):
     """
     Compare multiple reasoning methods
     
     Args:
         methods: List of method names
         dataset_name: Dataset name for display
+        model_name: Model name to evaluate with
         verbose: Whether to print detailed results
         
     Returns:
@@ -174,9 +180,11 @@ def compare_methods(methods, dataset_name=None, verbose=True):
             continue
         
         params = PARAM_DICT[method]
+        result_path = params["result_path"].format(dataset=dataset_name, model=model_name)
+        
         try:
             method_results = evaluate_method(
-                params["result_path"],
+                result_path,
                 params["K"],
                 params["K2"],
                 params["mode"],
@@ -201,7 +209,7 @@ def compare_methods(methods, dataset_name=None, verbose=True):
                 res['avg_input_tokens'] + res['avg_output_tokens']
             ])
         
-        print(f"\nResults for {dataset_name or 'all datasets'}:")
+        print(f"\nResults for {dataset_name} with {model_name}:")
         print(table)
     
     return results
@@ -210,20 +218,22 @@ def compare_methods(methods, dataset_name=None, verbose=True):
 def main():
     """Main evaluation function"""
     parser = argparse.ArgumentParser(description="Evaluate reasoning methods")
-    parser.add_argument("--method", type=str, default="all", help="Method to evaluate (all, CoT, A-MARP, DBE, MARC)")
+    parser.add_argument("--method", type=str, default="all", help="Method to evaluate (all, standard_cot, a_marp, dbe, marc)")
+    parser.add_argument("--dataset", type=str, required=True, help="Dataset name")
+    parser.add_argument("--model", type=str, required=True, help="Model name")
     parser.add_argument("--result_path", type=str, help="Custom result path")
     parser.add_argument("--K", type=float, help="Custom K threshold")
     parser.add_argument("--K2", type=float, help="Custom K2 threshold")
     parser.add_argument("--mode", type=str, default="nl", help="Evaluation mode (nl, tool, pot)")
-    parser.add_argument("--dataset", type=str, help="Dataset name for display")
     args = parser.parse_args()
     
     if args.method.lower() == "all":
-        compare_methods(["CoT", "A-MARP", "DBE", "MARC"], args.dataset)
+        compare_methods(["standard_cot", "a_marp", "dbe", "marc"], args.dataset, args.model)
     elif args.method in PARAM_DICT:
         params = PARAM_DICT[args.method]
+        result_path = args.result_path or params["result_path"].format(dataset=args.dataset, model=args.model)
         evaluate_method(
-            params["result_path"],
+            result_path,
             params["K"],
             params["K2"],
             params["mode"]
