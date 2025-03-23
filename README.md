@@ -196,7 +196,11 @@ Our work builds directly on the Reasoning Boundary Framework (RBF):
 ```bibtex
 @inproceedings{chen-etal-2024-rg,
     title = "Unlocking the Boundaries of Thought: A Reasoning Granularity Framework to Quantify and Optimize Chain-of-Thought",
-    author = "Chen, Qiguang and Qin, Libo and Jiaqi, Wang and Jinxuan, Zhou and Che, Wanxiang",
+    author = "Chen, Qiguang  and
+      Qin, Libo  and
+      Jiaqi, Wang  and
+      Jinxuan, Zhou  and
+      Che, Wanxiang",
     booktitle = "Proc. of NeurIPS",
     year = "2024",
 }
