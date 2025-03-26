@@ -34,16 +34,37 @@ We evaluate our methods on seven reasoning datasets across multiple domains:
 - **StrategyQA**: Questions requiring implicit multi-step reasoning and strategy.
 - **MGSM**: Multilingual mathematical reasoning dataset.
 
-### Dataset Preparation
+## Dataset Preparation
 
+The project uses seven reasoning datasets across multiple domains. You can prepare these datasets using the following steps:
+
+### Automatic Dataset Downloading
+
+Most datasets will be automatically downloaded when you run experiments for the first time. The `data/loaders/dataset_loaders.py` script handles dataset downloading via the Hugging Face datasets library.
+
+### Manual Dataset Preparation (if needed)
+
+For datasets that require manual preparation:
+
+1. **BIGGSM**: If not available through automatic download, create a directory:
+   ```bash
+   mkdir -p data/biggsm
+   ```
+   Place your BIGGSM dataset file in this directory as `data.jsonl`.
+
+2. **Custom Datasets**: To use your own datasets, add them to the appropriate directories under `data/` and implement a loader in `data/loaders/dataset_loaders.py`.
+
+### Dataset Configuration
+
+You can configure dataset parameters in your experiment commands:
 ```bash
-# Clone the repository
-git clone https://github.com/Barryshen1/adaptive-reasoning-boundaries.git
-cd adaptive-reasoning-boundaries
-
-# Install dependencies
-pip install -r requirements.txt
+python run_experiments.py --dataset gsm8k --sample_size 50 --difficulty_control True
 ```
+
+Parameters:
+- `--dataset`: Name of the dataset (gsm8k, math, biggsm, hotpotqa, strategyqa, multiarith, mgsm)
+- `--sample_size`: Number of examples to sample
+- `--difficulty_control`: Whether to create controlled difficulty test sets
 
 ## 🔧 Installation
 
@@ -190,5 +211,3 @@ For questions or feedback, please create GitHub issues or contact the authors.
 ---
 
 ## Acknowledgments
-
-
