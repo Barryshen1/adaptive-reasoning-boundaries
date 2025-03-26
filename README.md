@@ -40,19 +40,7 @@ The project uses seven reasoning datasets across multiple domains. You can prepa
 
 ### Automatic Dataset Downloading
 
-Most datasets will be automatically downloaded when you run experiments for the first time. The `data/loaders/dataset_loaders.py` script handles dataset downloading via the Hugging Face datasets library.
-
-### Manual Dataset Preparation (if needed)
-
-For datasets that require manual preparation:
-
-1. **BIGGSM**: If not available through automatic download, create a directory:
-   ```bash
-   mkdir -p data/biggsm
-   ```
-   Place your BIGGSM dataset file in this directory as `data.jsonl`.
-
-2. **Custom Datasets**: To use your own datasets, add them to the appropriate directories under `data/` and implement a loader in `data/loaders/dataset_loaders.py`.
+Datasets will be automatically downloaded when you run experiments for the first time. The `data/loaders/dataset_loaders.py` script handles dataset downloading via the Hugging Face datasets library.
 
 ### Dataset Configuration
 
