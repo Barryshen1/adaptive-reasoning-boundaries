@@ -3,6 +3,7 @@ Implementation of Advanced Minimum Acceptable Reasoning Paths (A-MARP)
 """
 import re
 import numpy as np
+from methods.dbe import DBE  # Import DBE directly
 
 
 class AMARP:
@@ -20,7 +21,8 @@ class AMARP:
                  alpha=0.15,  # Step calibration parameter
                  beta=0.08,   # Context sensitivity parameter
                  c_max=5,     # Maximum operations per step
-                 dbe_instance=None  # Reference to DBE instance for boundary estimates
+                 dbe_instance=None,  # Reference to DBE instance for boundary estimates
+                 dbe_params=None,   # Parameters to initialize DBE if not provided
                  ):
         """
         Initialize A-MARP with parameter settings
@@ -30,16 +32,32 @@ class AMARP:
             beta: Context sensitivity parameter
             c_max: Maximum operations per step
             dbe_instance: Reference to a DBE instance for boundary estimates
+            dbe_params: Parameters to initialize a new DBE instance if dbe_instance is None
         """
         self.alpha = alpha
         self.beta = beta
         self.c_max = c_max
-        self.dbe_instance = dbe_instance
+        
+        # Create DBE instance if not provided
+        if dbe_instance is None:
+            # Default DBE parameters if not provided
+            if dbe_params is None:
+                dbe_params = {
+                    "gamma": 0.12,
+                    "probe_frequency": 5,
+                    "probe_set_size": 7
+                }
+            self.dbe_instance = DBE(**dbe_params)
+            print("A-MARP initialized with a new DBE instance")
+        else:
+            self.dbe_instance = dbe_instance
+            print("A-MARP initialized with provided DBE instance")
+            
         self.memory = {}
     
     def get_boundary_estimates(self, model, task=None):
         """
-        Get boundary estimates from DBE if available
+        Get boundary estimates from DBE
         
         Args:
             model: The language model to get estimates for
@@ -48,16 +66,22 @@ class AMARP:
         Returns:
             Dictionary of estimated boundaries
         """
-        # First priority: Use DBE instance if available
-        if self.dbe_instance and hasattr(self.dbe_instance, 'boundary_estimates'):
+        # Always use DBE for boundary estimates
+        if hasattr(self.dbe_instance, 'boundary_estimates') and self.dbe_instance.boundary_estimates:
             return self.dbe_instance.boundary_estimates
         
-        # Second priority: Use calibrated boundaries from DBE if available
-        if self.dbe_instance and hasattr(self.dbe_instance, 'get_calibrated_boundaries'):
+        # If DBE has calibrated boundaries, use those
+        if hasattr(self.dbe_instance, 'get_calibrated_boundaries'):
             return self.dbe_instance.get_calibrated_boundaries()
-            
-        # Fallback: Return None, which will trigger a warning and use of default values
-        return None
+        
+        # If no boundary estimates available yet, request a probe deployment
+        # This would typically happen asynchronously with the model
+        print("Warning: No DBE boundary estimates available. DBE probes should be deployed first.")
+        return {
+            "calculation": None,
+            "planning": None,
+            "working_memory": None
+        }
     
     def adaptive_step_calibration(self, task, difficulty, model):
         """
@@ -74,21 +98,14 @@ class AMARP:
         # Get boundary estimates from DBE
         boundary_estimates = self.get_boundary_estimates(model, task)
         
-        # Extract calculation boundary or use a default if not available
-        if boundary_estimates and 'calculation' in boundary_estimates:
+        # Extract calculation boundary
+        if boundary_estimates and 'calculation' in boundary_estimates and boundary_estimates['calculation'] is not None:
             b_c = boundary_estimates['calculation']
         else:
-            # Fallback default values based on model size patterns
-            # These are only used if DBE is not available
-            print("Warning: No DBE boundary estimates available. Using fallback values.")
-            if 'gpt-4' in str(model).lower():
-                b_c = 1000000
-            elif 'claude' in str(model).lower():
-                b_c = 800000
-            elif 'llama-3-70b' in str(model).lower():
-                b_c = 150000
-            else:
-                b_c = 220000
+            # Temporary value only if DBE hasn't generated estimates yet
+            # This should be replaced by actual DBE estimates as soon as they're available
+            print("Warning: Waiting for DBE to generate calculation boundary estimates")
+            b_c = 100000  # Temporary placeholder until DBE estimates are ready
         
         return min(b_c / (1 + self.alpha * difficulty), self.c_max)
     
@@ -108,24 +125,16 @@ class AMARP:
         # Get boundary estimates from DBE
         boundary_estimates = self.get_boundary_estimates(model, task)
         
-        # Extract planning boundary or use a default if not available
-        if boundary_estimates and 'planning' in boundary_estimates:
+        # Extract planning boundary
+        if boundary_estimates and 'planning' in boundary_estimates and boundary_estimates['planning'] is not None:
             b_p = boundary_estimates['planning']
         else:
-            # Fallback default values
-            print("Warning: No DBE planning boundary estimate available. Using fallback values.")
-            if 'gpt-4' in str(model).lower():
-                b_p = 12.0
-            elif 'claude' in str(model).lower():
-                b_p = 10.0
-            elif 'llama-3-70b' in str(model).lower():
-                b_p = 5.0
-            else:
-                b_p = 7.0
+            # Temporary value only if DBE hasn't generated estimates yet
+            print("Warning: Waiting for DBE to generate planning boundary estimates")
+            b_p = 7.0  # Temporary placeholder until DBE estimates are ready
         
         if total_complexity is None:
             # Estimate total complexity if not provided
-            # This would typically be more sophisticated in practice
             total_complexity = difficulty * 10
         
         return max(int(np.ceil(difficulty * total_complexity / b_p)), 1)
@@ -152,9 +161,11 @@ class AMARP:
         if boundary_estimates:
             # Apply contextual adjustment to each boundary
             for dim, value in boundary_estimates.items():
-                adjusted_boundaries[dim] = value * (1 + self.beta * context_factor)
+                if value is not None:  # Ensure we only adjust valid boundaries
+                    adjusted_boundaries[dim] = value * (1 + self.beta * context_factor)
         else:
             # No adjustments if no boundary estimates available
+            print("Warning: Cannot adjust boundaries without DBE estimates")
             return boundary_estimates
             
         return adjusted_boundaries
@@ -367,3 +378,61 @@ This would flood coastal cities worldwide, displace billions of people, and radi
 
 Therefore, if all Antarctic ice melted, sea levels would rise dramatically by about 60 meters, causing catastrophic global flooding.
 #### Sea levels would rise by approximately 60 meters."""
+    
+    # Add a method to expose DBE's probe deployment
+    async def deploy_dbe_probes(self, requestor, probe_category=None, num_probes=None):
+        """
+        Deploy DBE probes to assess model capabilities
+        
+        Args:
+            requestor: The language model requestor for API calls
+            probe_category: Specific category to probe (if None, probe all)
+            num_probes: Number of probes to deploy
+            
+        Returns:
+            Probe results and updated boundary estimates
+        """
+        # Call DBE's deploy_probes method
+        probe_results, selected_probes = await self.dbe_instance.deploy_probes(
+            requestor, 
+            probe_category,
+            num_probes
+        )
+        
+        # Extract model name from requestor if available
+        model_name = getattr(requestor, "model_name", "unknown_model")
+        
+        # Update boundary estimates in DBE
+        updated_estimates = self.dbe_instance.estimate_boundaries(probe_results, model_name)
+        
+        return probe_results, updated_estimates
+    
+    # Add a method to run a complete experiment with DBE integration
+    async def process_with_dbe(self, task, difficulty, model, requestor, interaction_count=0):
+        """
+        Process a task with integrated DBE
+        
+        Args:
+            task: The reasoning task
+            difficulty: Estimated task difficulty 
+            model: The language model name
+            requestor: The language model requestor for API calls
+            interaction_count: Current interaction number
+            
+        Returns:
+            Processed results with DBE integration
+        """
+        # First, update DBE estimates if needed
+        if not self.dbe_instance.boundary_estimates or interaction_count % self.dbe_instance.probe_frequency == 0:
+            print(f"Deploying DBE probes at interaction {interaction_count}...")
+            probe_results, _ = await self.deploy_dbe_probes(requestor)
+        
+        # Generate the A-MARP prompt using DBE boundary estimates
+        prompt = self.generate_prompt(task, difficulty, model)
+        
+        # Return the prompt and current boundary estimates for execution
+        return {
+            "prompt": prompt,
+            "boundary_estimates": self.dbe_instance.boundary_estimates,
+            "interaction": interaction_count
+        }
