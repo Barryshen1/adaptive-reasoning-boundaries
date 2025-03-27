@@ -9,7 +9,7 @@ class AMARP:
     """
     Advanced Minimum Acceptable Reasoning Paths (A-MARP)
     
-    A-MARP extends the original MARP approach with four key enhancements:
+    A-MARP leverages dynamic boundary estimates from DBE with four key enhancements:
     1. Adaptive Step Calibration
     2. Difficulty-Aware Decomposition
     3. Contextual Boundary Awareness
@@ -20,8 +20,7 @@ class AMARP:
                  alpha=0.15,  # Step calibration parameter
                  beta=0.08,   # Context sensitivity parameter
                  c_max=5,     # Maximum operations per step
-                 b_c=None,    # Calculation boundary (if known)
-                 b_p=None,    # Planning boundary (if known)
+                 dbe_instance=None  # Reference to DBE instance for boundary estimates
                  ):
         """
         Initialize A-MARP with parameter settings
@@ -30,74 +29,35 @@ class AMARP:
             alpha: Calibration parameter for step complexity
             beta: Context sensitivity parameter
             c_max: Maximum operations per step
-            b_c: Calculation reasoning boundary (if known)
-            b_p: Planning reasoning boundary (if known)
+            dbe_instance: Reference to a DBE instance for boundary estimates
         """
         self.alpha = alpha
         self.beta = beta
         self.c_max = c_max
-        self.b_c = b_c
-        self.b_p = b_p
+        self.dbe_instance = dbe_instance
         self.memory = {}
     
-    def estimate_calculation_boundary(self, model):
+    def get_boundary_estimates(self, model, task=None):
         """
-        Estimate calculation boundary for a given model
+        Get boundary estimates from DBE if available
         
         Args:
-            model: The language model to estimate boundary for
+            model: The language model to get estimates for
+            task: The reasoning task (optional)
             
         Returns:
-            Estimated calculation boundary value
+            Dictionary of estimated boundaries
         """
-        # Placeholder for actual implementation
-        # In practice, this would involve probing the model with calculation tasks
-        if self.b_c is not None:
-            return self.b_c
+        # First priority: Use DBE instance if available
+        if self.dbe_instance and hasattr(self.dbe_instance, 'boundary_estimates'):
+            return self.dbe_instance.boundary_estimates
         
-        # Default values based on paper findings
-        boundary_values = {
-            'gpt-3.5-turbo': 220000,
-            'gpt-4': 1000000,
-            'claude-3-opus': 800000,
-            'claude-3.7-sonnet': 900000,
-            'llama-3-70b': 150000,
-            'o1-preview': 2000000,
-            'gpt-4.5-orion': 2500000,
-            'gpt-o3': 1800000,
-            'gpt-o1': 1600000,
-        }
-        
-        return boundary_values.get(model, 220000)
-    
-    def estimate_planning_boundary(self, model):
-        """
-        Estimate planning boundary for a given model
-        
-        Args:
-            model: The language model to estimate boundary for
+        # Second priority: Use calibrated boundaries from DBE if available
+        if self.dbe_instance and hasattr(self.dbe_instance, 'get_calibrated_boundaries'):
+            return self.dbe_instance.get_calibrated_boundaries()
             
-        Returns:
-            Estimated planning boundary value
-        """
-        # Placeholder for actual implementation
-        if self.b_p is not None:
-            return self.b_p
-        
-        # Default values based on paper findings
-        boundary_values = {
-            'gpt-3.5-turbo': 7.0,
-            'gpt-4': 12.0,
-            'claude-3-opus': 10.0,
-            'claude-3.7-sonnet': 11.0,
-            'llama-3-70b': 5.0,
-            'o1-preview': 15.0,
-            'gpt-4.5-orion': 18.0,
-            'gpt-o3': 14.0,
-            'gpt-o1': 13.0,
-        }
-        
-        return boundary_values.get(model, 7.0)
+        # Fallback: Return None, which will trigger a warning and use of default values
+        return None
     
     def adaptive_step_calibration(self, task, difficulty, model):
         """
@@ -111,7 +71,25 @@ class AMARP:
         Returns:
             Recommended computational complexity per step
         """
-        b_c = self.estimate_calculation_boundary(model)
+        # Get boundary estimates from DBE
+        boundary_estimates = self.get_boundary_estimates(model, task)
+        
+        # Extract calculation boundary or use a default if not available
+        if boundary_estimates and 'calculation' in boundary_estimates:
+            b_c = boundary_estimates['calculation']
+        else:
+            # Fallback default values based on model size patterns
+            # These are only used if DBE is not available
+            print("Warning: No DBE boundary estimates available. Using fallback values.")
+            if 'gpt-4' in str(model).lower():
+                b_c = 1000000
+            elif 'claude' in str(model).lower():
+                b_c = 800000
+            elif 'llama-3-70b' in str(model).lower():
+                b_c = 150000
+            else:
+                b_c = 220000
+        
         return min(b_c / (1 + self.alpha * difficulty), self.c_max)
     
     def difficulty_aware_decomposition(self, task, difficulty, model, total_complexity=None):
@@ -127,7 +105,23 @@ class AMARP:
         Returns:
             Recommended number of reasoning steps
         """
-        b_p = self.estimate_planning_boundary(model)
+        # Get boundary estimates from DBE
+        boundary_estimates = self.get_boundary_estimates(model, task)
+        
+        # Extract planning boundary or use a default if not available
+        if boundary_estimates and 'planning' in boundary_estimates:
+            b_p = boundary_estimates['planning']
+        else:
+            # Fallback default values
+            print("Warning: No DBE planning boundary estimate available. Using fallback values.")
+            if 'gpt-4' in str(model).lower():
+                b_p = 12.0
+            elif 'claude' in str(model).lower():
+                b_p = 10.0
+            elif 'llama-3-70b' in str(model).lower():
+                b_p = 5.0
+            else:
+                b_p = 7.0
         
         if total_complexity is None:
             # Estimate total complexity if not provided
@@ -151,8 +145,19 @@ class AMARP:
         task_type = self._identify_task_type(task)
         context_factor = self._calculate_context_factor(task_type)
         
-        b_original = self.estimate_calculation_boundary(model)
-        return b_original * (1 + self.beta * context_factor)
+        # Get boundary estimates from DBE
+        boundary_estimates = self.get_boundary_estimates(model, task)
+        adjusted_boundaries = {}
+        
+        if boundary_estimates:
+            # Apply contextual adjustment to each boundary
+            for dim, value in boundary_estimates.items():
+                adjusted_boundaries[dim] = value * (1 + self.beta * context_factor)
+        else:
+            # No adjustments if no boundary estimates available
+            return boundary_estimates
+            
+        return adjusted_boundaries
     
     def _identify_task_type(self, task):
         """
@@ -241,7 +246,7 @@ class AMARP:
     
     def generate_prompt(self, task, difficulty, model):
         """
-        Generate optimized prompting strategy
+        Generate optimized prompting strategy using dynamic boundary estimates
         
         Args:
             task: The reasoning task
@@ -251,10 +256,16 @@ class AMARP:
         Returns:
             Structured prompt for the reasoning task
         """
-        # Calculate key parameters
+        # Get dynamic boundary estimates and apply contextual adjustment
+        boundary_estimates = self.get_boundary_estimates(model, task)
+        if boundary_estimates:
+            adjusted_boundaries = self.contextual_boundary_adjustment(task, model)
+        else:
+            adjusted_boundaries = None
+            
+        # Calculate key parameters using the dynamic boundaries
         c_step = self.adaptive_step_calibration(task, difficulty, model)
         n_steps = self.difficulty_aware_decomposition(task, difficulty, model)
-        adjusted_boundary = self.contextual_boundary_adjustment(task, model)
         
         # Construct the prompt
         prompt = "You need to perform multi-step reasoning with adaptive complexity.\n\n"
