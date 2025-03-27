@@ -76,10 +76,10 @@ export ANTHROPIC_API_KEY=your_api_key_here
 ### Run experiments with different methods
 
 ```bash
-# Run A-MARP on GSM8K with GPT-4
+# Run integrated A-MARP with DBE on GSM8K with GPT-4
 python run_experiments.py --method a_marp --dataset gsm8k --model gpt-4 --sample_size 50
 
-# Run DBE on GSM8K with GPT-4
+# Run standalone DBE on GSM8K with GPT-4
 python run_experiments.py --method dbe --dataset gsm8k --model gpt-4 --sample_size 50
 
 # Run MARC on GSM8K with GPT-4
@@ -94,10 +94,13 @@ python run_experiments.py --method standard_cot --dataset gsm8k --model gpt-4 --
 Evaluate results:
 
 ```bash
-# Evaluate a specific method
-python evaluation/evaluate.py --method A-MARP
+# Evaluate the integrated A-MARP method
+python evaluation/evaluate.py --method a_marp
 
-# Compare all methods
+# For more detailed analysis of boundary estimation accuracy from the integration
+python evaluation/evaluate.py --method a_marp --dataset gsm8k --model gpt-4 --K 0.12 --K2 0.53
+
+# Compare all methods including the integrated A-MARP
 python evaluation/evaluate.py --method all --dataset gsm8k
 ```
 
@@ -107,6 +110,20 @@ Analyze and visualize results:
 # Generate visualizations
 python analyze_results.py --visualize
 ```
+## Additional Documentation Suggestion
+
+I would also recommend adding a brief explanation in the README about how A-MARP and DBE are now integrated:
+
+```markdown
+## 🔍 Method Integration
+
+Our implementation now features an integrated approach where A-MARP leverages the dynamic boundary estimation capabilities of DBE. This integration provides several benefits:
+
+1. **Dynamic adaptation**: A-MARP uses real-time boundary estimates from DBE to optimize reasoning paths
+2. **Contextual awareness**: The combined approach adjusts to both task difficulty and model capabilities
+3. **Efficient calibration**: Boundary estimates improve over time as more interactions occur
+
+When running experiments with the `a_marp` method, the DBE integration is automatically enabled with default parameters unless custom configuration is provided.
 
 ## 🧪 Experimental Results
 
