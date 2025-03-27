@@ -69,10 +69,16 @@ async def run_experiment(
         "a_marp": {
             "alpha": 0.15,
             "beta": 0.08,
-            "c_max": 5
+            "c_max": 5,
+            "dbe": {
+                "gamma": 0.12,
+                "probe_frequency": 5,
+                "probe_set_size": 7
+            }
         },
         "dbe": {
             "gamma": 0.12,
+            "probe_frequency": 5,
             "probe_set_size": 7
         },
         "marc": {
@@ -88,10 +94,22 @@ async def run_experiment(
     # Set up method
     method = None
     if method_name == "a_marp":
+        # Extract DBE-specific parameters
+        dbe_params = method_config.get("dbe", {})
+        if not dbe_params:
+            # Extract DBE parameters from main config if not specified in "dbe" key
+            dbe_params = {
+                "gamma": method_config.get("gamma", 0.12),
+                "probe_frequency": method_config.get("probe_frequency", 5),
+                "probe_set_size": method_config.get("probe_set_size", 7)
+            }
+        
+        # Initialize A-MARP with integrated DBE
         method = AMARP(
             alpha=method_config.get("alpha", 0.15),
             beta=method_config.get("beta", 0.08),
-            c_max=method_config.get("c_max", 5)
+            c_max=method_config.get("c_max", 5),
+            dbe_params=dbe_params
         )
     elif method_name == "dbe":
         method = DBE(
@@ -158,10 +176,21 @@ async def run_experiment(
                 elif method_name == "a_marp":
                     # Get difficulty estimate
                     difficulty = estimate_task_difficulty(item["question"])
-                    prompt = method.generate_prompt(item["question"], difficulty, model_name)
+                    
+                    # Use the integrated process_with_dbe method
+                    result = await method.process_with_dbe(
+                        item["question"], 
+                        difficulty, 
+                        model_name,
+                        requestor,
+                        i  # Pass the current item index as interaction count
+                    )
+                    
+                    # Extract the prompt
+                    prompt = result["prompt"]
                 elif method_name == "dbe":
                     # For DBE, we'll simulate the interaction sequence
-                    current_interaction = 0
+                    current_interaction = i % method.probe_frequency  # Reset interaction counter periodically
                     prompt, _, _ = method.process_interaction(
                         item["question"], 
                         model_name,
@@ -181,6 +210,14 @@ async def run_experiment(
                         start_time = time.time()
                         response = await requestor.request(prompt, temperature=0.7, max_tokens=1024)
                         end_time = time.time()
+                        
+                        # If using A-MARP, update the DBE interaction history
+                        if method_name == "a_marp" and hasattr(method, "dbe_instance"):
+                            # Get the response text
+                            response_text = response[-1]["content"][0]["text"] if isinstance(response, list) else ""
+                            # Update DBE's interaction history with the response
+                            method.dbe_instance.update_interaction_history(prompt, response_text)
+                        
                         break
                     except Exception as e:
                         if retry < max_retries - 1:
@@ -201,6 +238,10 @@ async def run_experiment(
                     "seed": seed,
                     "run": run
                 }
+                
+                # If using A-MARP, store boundary estimates
+                if method_name == "a_marp" and hasattr(method, "dbe_instance"):
+                    result["boundary_estimates"] = method.dbe_instance.boundary_estimates
                 
                 # Append to results
                 results.append(result)
