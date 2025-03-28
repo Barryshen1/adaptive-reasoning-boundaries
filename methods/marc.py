@@ -1,5 +1,6 @@
 """
 Implementation of Multi-Agent Reasoning Collaboration (MARC)
+with Dynamic Boundary Estimation (DBE) integration
 """
 import numpy as np
 import json
@@ -8,6 +9,7 @@ import asyncio
 import os
 from collections import defaultdict
 from utils.request_tool import MMRequestor
+from methods.dbe import DBE  # Import DBE for dynamic boundary estimation
 
 
 class MARC:
@@ -16,6 +18,9 @@ class MARC:
     
     MARC leverages multiple specialized agents with complementary reasoning 
     boundaries to collaboratively solve complex tasks.
+    
+    Now integrated with Dynamic Boundary Estimation (DBE) to continuously
+    update agent boundary profiles based on observed performance.
     """
     
     def __init__(self, 
@@ -23,7 +28,8 @@ class MARC:
                  max_communication_rounds=5,  # Maximum number of communication rounds
                  api_key=None,              # API key for LLM services
                  api_base=None,             # Base URL for API
-                 verbose=False              # Whether to print detailed process information
+                 verbose=False,             # Whether to print detailed process information
+                 dbe_params=None            # Parameters for DBE instances
                  ):
         """
         Initialize MARC with agent configuration
@@ -34,12 +40,23 @@ class MARC:
             api_key: API key for LLM services
             api_base: Base URL for API
             verbose: Whether to print detailed process information
+            dbe_params: Parameters for DBE instances (gamma, probe_frequency, etc.)
         """
         self.agents = agents or {}
         self.max_communication_rounds = max_communication_rounds
         self.api_key = api_key
         self.api_base = api_base
         self.verbose = verbose
+        
+        # Default DBE parameters if not provided
+        self.dbe_params = dbe_params or {
+            "gamma": 0.12,               # Error sensitivity parameter
+            "probe_frequency": 5,         # How often to deploy probes
+            "probe_set_size": 7           # Number of probes per assessment
+        }
+        
+        # Initialize DBE instances for each agent
+        self.dbe_instances = {}
         
         # Initialize collaboration state
         self.task_assignments = {}  # Map of subtasks to agents
@@ -48,6 +65,7 @@ class MARC:
         self.consensus_votes = defaultdict(dict)  # Votes on critical decisions
         self.subtasks = []  # List of all subtasks
         self.requestors = {}  # Dictionary of requestors for each agent
+        self.boundary_updates = {}  # Track boundary updates during collaboration
 
     def _log(self, message):
         """
@@ -77,8 +95,21 @@ class MARC:
             "boundaries": boundary_profile,
             "model": model_name,
             "current_task": None,
-            "status": "idle"
+            "status": "idle",
+            "boundary_history": {k: [v] for k, v in boundary_profile.items()}  # Track boundary history
         }
+        
+        # Create a DBE instance for this agent
+        results_path = f"experiments/results/dbe_boundaries_{agent_id}.json"
+        self.dbe_instances[agent_id] = DBE(
+            gamma=self.dbe_params.get("gamma", 0.12),
+            probe_frequency=self.dbe_params.get("probe_frequency", 5),
+            probe_set_size=self.dbe_params.get("probe_set_size", 7),
+            initial_boundary_estimates=boundary_profile.copy(),
+            results_path=results_path
+        )
+        
+        self._log(f"Initialized DBE instance for agent {agent_id} with boundary profile: {boundary_profile}")
         
         # Create a requestor for this agent
         model_type = "openai" if model_name and any(name in model_name.lower() for name in ["gpt", "o1", "o3"]) else \
@@ -187,6 +218,104 @@ class MARC:
         self._log(f"Selected integrator agent: {best_integrator}")
         return best_integrator
     
+    async def deploy_dbe_probes(self, agent_id, requestor=None):
+        """
+        Deploy DBE probes to assess agent capabilities
+        
+        Args:
+            agent_id: Agent ID to probe
+            requestor: Requestor to use for API calls (optional)
+            
+        Returns:
+            Updated boundary estimates
+        """
+        self._log(f"Deploying DBE probes for agent {agent_id}")
+        
+        # Get the DBE instance for this agent
+        dbe_instance = self.dbe_instances.get(agent_id)
+        if not dbe_instance:
+            self._log(f"No DBE instance found for agent {agent_id}")
+            return None
+        
+        # Get the requestor for this agent
+        if requestor is None:
+            requestor = self.requestors.get(agent_id)
+            if not requestor:
+                self._log(f"No requestor found for agent {agent_id}")
+                return None
+        
+        try:
+            # Deploy probes
+            probe_results, _ = await dbe_instance.deploy_probes(requestor)
+            
+            # Extract model name from agent
+            model_name = self.agents[agent_id]["model"]
+            
+            # Update boundary estimates
+            updated_boundaries = dbe_instance.estimate_boundaries(probe_results, model_name)
+            
+            # Analyze error patterns
+            error_patterns = dbe_instance.analyze_error_patterns(dbe_instance.interaction_history)
+            
+            # Refine boundary estimates
+            refined_estimates = dbe_instance.refine_boundary_estimates(error_patterns)
+            
+            # Calibrate confidence
+            confidence_factors = dbe_instance.calibrate_confidence(probe_results)
+            
+            # Apply confidence calibration
+            calibrated_estimates = dbe_instance.calibrate_boundary_estimates(refined_estimates, confidence_factors)
+            
+            # Update agent boundaries with calibrated estimates
+            self.update_agent_boundaries(agent_id, calibrated_estimates)
+            
+            self._log(f"Updated boundaries for agent {agent_id}: {calibrated_estimates}")
+            return calibrated_estimates
+            
+        except Exception as e:
+            self._log(f"Error deploying DBE probes for agent {agent_id}: {e}")
+            return None
+    
+    def update_agent_boundaries(self, agent_id, boundary_estimates):
+        """
+        Update an agent's boundary profile with DBE estimates
+        
+        Args:
+            agent_id: Agent ID to update
+            boundary_estimates: New boundary estimates
+            
+        Returns:
+            Updated agent boundary profile
+        """
+        if agent_id not in self.agents:
+            self._log(f"Agent {agent_id} not found")
+            return None
+        
+        # Update agent boundaries
+        agent = self.agents[agent_id]
+        old_boundaries = agent["boundaries"].copy()
+        
+        # Only update dimensions that are in both estimates and original boundaries
+        for dim, value in boundary_estimates.items():
+            if dim in agent["boundaries"]:
+                agent["boundaries"][dim] = value
+                
+                # Track boundary history
+                if dim in agent["boundary_history"]:
+                    agent["boundary_history"][dim].append(value)
+                else:
+                    agent["boundary_history"][dim] = [value]
+        
+        # Record this update
+        self.boundary_updates[agent_id] = {
+            "timestamp": len(self.boundary_updates.get(agent_id, [])),
+            "old_boundaries": old_boundaries,
+            "new_boundaries": agent["boundaries"].copy()
+        }
+        
+        self._log(f"Updated boundaries for agent {agent_id}: {agent['boundaries']}")
+        return agent["boundaries"]
+    
     async def decompose_task(self, task, planner_agent_id):
         """
         Decompose the main task into subtasks using the planner agent
@@ -277,6 +406,16 @@ class MARC:
             # Save subtasks for future reference
             self.subtasks = subtasks
             self._log(f"Task decomposed into {len(subtasks)} subtasks")
+            
+            # Update DBE interaction history for the planner
+            if planner_agent_id in self.dbe_instances:
+                dbe_instance = self.dbe_instances[planner_agent_id]
+                dbe_instance.update_interaction_history(decomposition_prompt, response_text)
+                
+                # Update boundary estimates after this interaction
+                error_patterns = dbe_instance.analyze_error_patterns(dbe_instance.interaction_history)
+                refined_estimates = dbe_instance.refine_boundary_estimates(error_patterns)
+                self.update_agent_boundaries(planner_agent_id, refined_estimates)
             
             return subtasks
             
@@ -547,6 +686,7 @@ class MARC:
             best_alignment = -1
             
             for agent_id, agent in self.agents.items():
+                # Use the most up-to-date boundary estimates
                 alignment = self.measure_boundary_alignment(agent["boundaries"], difficulty)
                 
                 if alignment > best_alignment:
@@ -629,6 +769,18 @@ class MARC:
             
             # Extract the response text
             response_text = response[-1]["content"][0]["text"] if isinstance(response, list) else response
+            
+            # Update DBE interaction history and boundary estimates
+            if agent_id in self.dbe_instances:
+                dbe_instance = self.dbe_instances[agent_id]
+                dbe_instance.update_interaction_history(prompt, response_text)
+                
+                # Analyze the interaction and update boundary estimates
+                error_patterns = dbe_instance.analyze_error_patterns(dbe_instance.interaction_history)
+                refined_estimates = dbe_instance.refine_boundary_estimates(error_patterns)
+                
+                # Update agent boundaries with refined estimates
+                self.update_agent_boundaries(agent_id, refined_estimates)
             
             # Analyze confidence in the response
             confidence = self._analyze_confidence(response_text)
@@ -937,7 +1089,7 @@ class MARC:
             for dep_id, dep_result in context.items():
                 assistant_prompt += f"From {dep_id}: {dep_result}\n\n"
         
-        assistant_prompt += "\nProvide your response focusing on the {focus_dimension} aspects:"
+        assistant_prompt += f"\nProvide your response focusing on the {focus_dimension} aspects:"
         
         try:
             # Get the assistant's response
@@ -957,6 +1109,16 @@ class MARC:
             
             assistant_response = await assistant_requestor.request(assistant_prompt, temperature=0.3, max_tokens=2048)
             assistant_text = assistant_response[-1]["content"][0]["text"] if isinstance(assistant_response, list) else assistant_response
+            
+            # Update DBE interaction history for the assistant
+            if assistant_agent_id in self.dbe_instances:
+                dbe_instance = self.dbe_instances[assistant_agent_id]
+                dbe_instance.update_interaction_history(assistant_prompt, assistant_text)
+                
+                # Update boundary estimates for the assistant
+                error_patterns = dbe_instance.analyze_error_patterns(dbe_instance.interaction_history)
+                refined_estimates = dbe_instance.refine_boundary_estimates(error_patterns)
+                self.update_agent_boundaries(assistant_agent_id, refined_estimates)
             
             # Now, have the lead agent complete the task with the assistant's input
             lead_prompt = f"""
@@ -993,6 +1155,16 @@ class MARC:
             
             lead_response = await lead_requestor.request(lead_prompt, temperature=0.3, max_tokens=2048)
             lead_text = lead_response[-1]["content"][0]["text"] if isinstance(lead_response, list) else lead_response
+            
+            # Update DBE interaction history for the lead agent
+            if lead_agent_id in self.dbe_instances:
+                dbe_instance = self.dbe_instances[lead_agent_id]
+                dbe_instance.update_interaction_history(lead_prompt, lead_text)
+                
+                # Update boundary estimates for the lead agent
+                error_patterns = dbe_instance.analyze_error_patterns(dbe_instance.interaction_history)
+                refined_estimates = dbe_instance.refine_boundary_estimates(error_patterns)
+                self.update_agent_boundaries(lead_agent_id, refined_estimates)
             
             # Combine the results
             combined_result = f"Collaborative solution to subtask {subtask_id}:\n\n{lead_text}"
@@ -1082,6 +1254,11 @@ class MARC:
                     
                     response = await requestor.request(voting_prompt, temperature=0.3, max_tokens=256)
                     response_text = response[-1]["content"][0]["text"] if isinstance(response, list) else response
+                    
+                    # Update DBE interaction history for this agent
+                    if agent_id in self.dbe_instances:
+                        dbe_instance = self.dbe_instances[agent_id]
+                        dbe_instance.update_interaction_history(voting_prompt, response_text)
                     
                     # Extract the option number from the response
                     option_match = re.search(r'\b([1-9])\b', response_text)
@@ -1249,6 +1426,16 @@ class MARC:
             # Extract the response text
             response_text = response[-1]["content"][0]["text"] if isinstance(response, list) else response
             
+            # Update DBE interaction history for the integrator
+            if integrator_id in self.dbe_instances:
+                dbe_instance = self.dbe_instances[integrator_id]
+                dbe_instance.update_interaction_history(integration_prompt, response_text)
+                
+                # Update boundary estimates for the integrator
+                error_patterns = dbe_instance.analyze_error_patterns(dbe_instance.interaction_history)
+                refined_estimates = dbe_instance.refine_boundary_estimates(error_patterns)
+                self.update_agent_boundaries(integrator_id, refined_estimates)
+            
             return response_text
             
         except Exception as e:
@@ -1342,6 +1529,16 @@ class MARC:
             # Extract the response text
             response_text = response[-1]["content"][0]["text"] if isinstance(response, list) else response
             
+            # Update DBE interaction history for the verifier
+            if verifier_id in self.dbe_instances:
+                dbe_instance = self.dbe_instances[verifier_id]
+                dbe_instance.update_interaction_history(verification_prompt, response_text)
+                
+                # Update boundary estimates for the verifier
+                error_patterns = dbe_instance.analyze_error_patterns(dbe_instance.interaction_history)
+                refined_estimates = dbe_instance.refine_boundary_estimates(error_patterns)
+                self.update_agent_boundaries(verifier_id, refined_estimates)
+            
             # Parse the verification result
             valid = "yes" in response_text.lower() and "no" not in response_text.lower()[:50]
             
@@ -1399,10 +1596,22 @@ class MARC:
             "task": task,
             "start_time": "simulated_timestamp",
             "agents": {agent_id: agent.copy() for agent_id, agent in self.agents.items()},
+            "boundary_updates": {},
             "phases": []
         }
         
         self._log(f"Starting to solve task: {task}")
+        
+        # Initially deploy probes for all agents to get baseline boundary estimates
+        for agent_id in self.agents:
+            try:
+                await self.deploy_dbe_probes(agent_id)
+                # Record initial boundaries in collaboration record
+                collaboration_record["boundary_updates"][agent_id] = {
+                    "initial": self.agents[agent_id]["boundaries"].copy()
+                }
+            except Exception as e:
+                self._log(f"Error deploying initial probes for agent {agent_id}: {e}")
         
         # Phase 1: Planning
         planner_id = self.select_planner_agent()
@@ -1434,6 +1643,7 @@ class MARC:
             self._log(f"Processing round {round_num+1}/{self.max_communication_rounds}")
             round_record = {
                 "round": round_num,
+                "boundary_updates": {},
                 "actions": []
             }
             
@@ -1456,6 +1666,15 @@ class MARC:
                 # No tasks ready or all tasks completed
                 break
             
+            # Record boundary updates for this round
+            for agent_id in self.agents:
+                round_record["boundary_updates"][agent_id] = self.agents[agent_id]["boundaries"].copy()
+                
+                # Also update the overall collaboration record
+                if agent_id not in collaboration_record["boundary_updates"]:
+                    collaboration_record["boundary_updates"][agent_id] = {}
+                collaboration_record["boundary_updates"][agent_id][f"round_{round_num}"] = self.agents[agent_id]["boundaries"].copy()
+            
             # Process each ready task
             for subtask_id, assignment in ready_tasks:
                 agent_id = assignment["agent_id"]
@@ -1470,7 +1689,8 @@ class MARC:
                     "action": "process_subtask",
                     "agent_id": agent_id,
                     "subtask_id": subtask_id,
-                    "result_status": result["status"]
+                    "result_status": result["status"],
+                    "boundary_before": self.agents[agent_id]["boundaries"].copy()  # Capture boundaries before update
                 }
                 
                 if result["status"] == "completed":
@@ -1485,6 +1705,17 @@ class MARC:
                     self.agents[agent_id]["status"] = "idle"
                     self.agents[agent_id]["current_task"] = None
                     
+                    # Update boundary estimates based on successful completion
+                    if agent_id in self.dbe_instances:
+                        dbe_instance = self.dbe_instances[agent_id]
+                        # Successful completion might warrant a positive adjustment to boundaries
+                        difficulty = self.estimate_task_difficulty(subtask)
+                        for dim, diff in difficulty.items():
+                            if dim in self.agents[agent_id]["boundaries"]:
+                                # Slightly increase boundary for this dimension based on success
+                                self.agents[agent_id]["boundaries"][dim] *= 1.05
+                                self.agents[agent_id]["boundary_history"][dim].append(self.agents[agent_id]["boundaries"][dim])
+                    
                     self._log(f"Subtask {subtask_id} completed successfully by agent {agent_id}")
                     
                 elif result["status"] == "boundary_reached":
@@ -1492,7 +1723,17 @@ class MARC:
                     difficulty = self.estimate_task_difficulty(subtask)
                     assistance_plan = self.request_assistance(agent_id, subtask_id, difficulty)
                     
+                    # Update boundary estimates to reflect the difficulty limits
+                    if agent_id in self.dbe_instances:
+                        for dim, diff in difficulty.items():
+                            if dim in self.agents[agent_id]["boundaries"] and diff > self.agents[agent_id]["boundaries"][dim]:
+                                # Adjust boundary downward based on failure
+                                adjusted = max(0.9 * self.agents[agent_id]["boundaries"][dim], diff * 0.8)
+                                self.agents[agent_id]["boundaries"][dim] = adjusted
+                                self.agents[agent_id]["boundary_history"][dim].append(adjusted)
+                    
                     action_record["assistance_plan"] = assistance_plan
+                    action_record["boundary_after"] = self.agents[agent_id]["boundaries"].copy()  # Capture boundaries after update
                     
                     # If assistance available, process with collaboration
                     if assistance_plan:
@@ -1511,6 +1752,22 @@ class MARC:
                         if collaborative_result["status"] == "completed":
                             self.solution_components[subtask_id] = collaborative_result
                             action_record["collaborative_result"] = "success"
+                            
+                            # Update boundaries based on successful collaboration
+                            if lead_agent in self.dbe_instances and assistant_agent in self.dbe_instances:
+                                # Lead agent gets a slight boundary decrease in the challenging dimension
+                                if focus_dimension in self.agents[lead_agent]["boundaries"]:
+                                    self.agents[lead_agent]["boundaries"][focus_dimension] *= 0.95
+                                    self.agents[lead_agent]["boundary_history"][focus_dimension].append(
+                                        self.agents[lead_agent]["boundaries"][focus_dimension]
+                                    )
+                                
+                                # Assistant agent gets a slight boundary increase in their strong dimension
+                                if focus_dimension in self.agents[assistant_agent]["boundaries"]:
+                                    self.agents[assistant_agent]["boundaries"][focus_dimension] *= 1.05
+                                    self.agents[assistant_agent]["boundary_history"][focus_dimension].append(
+                                        self.agents[assistant_agent]["boundaries"][focus_dimension]
+                                    )
                             
                             self._log(f"Collaborative processing of subtask {subtask_id} succeeded")
                         else:
@@ -1632,6 +1889,10 @@ class MARC:
         collaboration_record["completion_status"] = "success" if validation_result["valid"] else "partial"
         collaboration_record["end_time"] = "simulated_timestamp"
         collaboration_record["messages_exchanged"] = len(self.communication_history)
+        
+        # Final boundary states
+        collaboration_record["final_boundaries"] = {agent_id: agent["boundaries"].copy() for agent_id, agent in self.agents.items()}
+        collaboration_record["boundary_history"] = {agent_id: agent["boundary_history"] for agent_id, agent in self.agents.items()}
         
         self._log("Task solving completed")
         return collaboration_record
