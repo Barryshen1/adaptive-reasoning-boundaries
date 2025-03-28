@@ -82,7 +82,12 @@ async def run_experiment(
             "probe_set_size": 7
         },
         "marc": {
-            "max_communication_rounds": 5
+            "max_communication_rounds": 5,
+            "dbe": {
+                "gamma": 0.12,
+                "probe_frequency": 5,
+                "probe_set_size": 7
+            }
         }
     }
     
@@ -118,8 +123,19 @@ async def run_experiment(
             probe_set_size=method_config.get("probe_set_size", 7)
         )
     elif method_name == "marc":
+        # Extract DBE-specific parameters
+        dbe_params = method_config.get("dbe", {})
+        if not dbe_params:
+            # Extract DBE parameters from main config if not specified in "dbe" key
+            dbe_params = {
+                "gamma": method_config.get("gamma", 0.12),
+                "probe_frequency": method_config.get("probe_frequency", 5),
+                "probe_set_size": method_config.get("probe_set_size", 7)
+            }
+            
         method = MARC(
-            max_communication_rounds=method_config.get("max_communication_rounds", 5)
+            max_communication_rounds=method_config.get("max_communication_rounds", 5),
+            dbe_params=dbe_params
         )
         
         # Set up agents for MARC based on Section 4.2 of the paper
@@ -191,14 +207,17 @@ async def run_experiment(
                 elif method_name == "dbe":
                     # For DBE, we'll simulate the interaction sequence
                     current_interaction = i % method.probe_frequency  # Reset interaction counter periodically
-                    prompt, _, _ = method.process_interaction(
+                    prompt, _, _ = await method.process_interaction(
                         item["question"], 
-                        model_name,
+                        requestor,
                         current_interaction
                     )
                 elif method_name == "marc":
                     # For MARC, we need a more complex workflow
-                    collaboration_record = method.solve_task(item["question"])
+                    collaboration_record = await method.solve_task(item["question"])
+                    # Store the full collaboration record in the results
+                    
+                    # Create a standard prompt for evaluation consistency
                     prompt = f"Solve this collaborative reasoning task:\n{item['question']}"
                 else:
                     raise ValueError(f"Unknown method: {method_name}")
@@ -242,6 +261,11 @@ async def run_experiment(
                 # If using A-MARP, store boundary estimates
                 if method_name == "a_marp" and hasattr(method, "dbe_instance"):
                     result["boundary_estimates"] = method.dbe_instance.boundary_estimates
+                
+                # If using MARC, store the collaboration record and boundary estimates
+                if method_name == "marc":
+                    result["collaboration_record"] = collaboration_record
+                    result["boundary_updates"] = method.boundary_updates
                 
                 # Append to results
                 results.append(result)
