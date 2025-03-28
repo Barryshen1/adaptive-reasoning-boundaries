@@ -39,7 +39,12 @@ PARAM_DICT = {
         "K": 0.106,
         "K2": 0.50,
         "mode": "nl",
-        "result_path": "experiments/results/marc_{dataset}_{model}.jsonl"
+        "result_path": "experiments/results/marc_{dataset}_{model}.jsonl",
+        "dbe_params": {
+            "gamma": 0.12,
+            "probe_frequency": 5,
+            "probe_set_size": 7
+        }
     }
 }
 
@@ -71,6 +76,15 @@ def evaluate_method(result_path, K, K2, mode="nl", verbose=True):
     enc = tiktoken.encoding_for_model("gpt-4")
     acc = {">90%": {"correct": 0, "total": 0}, "10%~90%": {"correct": 0, "total": 0}, "<10%": {"correct": 0, "total": 0}}
     
+    # For MARC, track additional statistics about DBE integration
+    is_marc = "marc" in result_path
+    marc_dbe_stats = {
+        "boundary_updates": 0,
+        "avg_boundary_change": {},
+        "agent_count": 0,
+        "collaboration_count": 0
+    }
+    
     # Evaluate each result
     for idx in tqdm(range(len(response_list)), desc="Evaluating", disable=not verbose):
         try:
@@ -94,6 +108,43 @@ def evaluate_method(result_path, K, K2, mode="nl", verbose=True):
             if correct:
                 acc[granularity_key]["correct"] += 1
             acc[granularity_key]["total"] += 1
+            
+            # Track MARC-specific statistics
+            if is_marc and "boundary_updates" in response_list.data[idx]:
+                marc_dbe_stats["boundary_updates"] += 1
+                
+                # Count number of agents
+                if "collaboration_record" in response_list.data[idx]:
+                    if "agents" in response_list.data[idx]["collaboration_record"]:
+                        marc_dbe_stats["agent_count"] = max(
+                            marc_dbe_stats["agent_count"],
+                            len(response_list.data[idx]["collaboration_record"]["agents"])
+                        )
+                    
+                    # Count collaborations
+                    if "phases" in response_list.data[idx]["collaboration_record"]:
+                        for phase in response_list.data[idx]["collaboration_record"]["phases"]:
+                            if phase.get("phase") == "processing" and "rounds" in phase:
+                                for round_data in phase["rounds"]:
+                                    if "actions" in round_data:
+                                        for action in round_data["actions"]:
+                                            if action.get("action") == "process_collaborative_subtask":
+                                                marc_dbe_stats["collaboration_count"] += 1
+                
+                # Track boundary changes
+                for agent_id, updates in response_list.data[idx]["boundary_updates"].items():
+                    for dim in ["calculation", "planning", "working_memory"]:
+                        if dim not in marc_dbe_stats["avg_boundary_change"]:
+                            marc_dbe_stats["avg_boundary_change"][dim] = []
+                        
+                        # Calculate relative change from initial to final if available
+                        if "initial" in updates and f"round_{len(updates)-2}" in updates:
+                            initial = updates["initial"].get(dim, 0)
+                            final = updates[f"round_{len(updates)-2}"].get(dim, 0)
+                            if initial > 0:
+                                change = (final - initial) / initial
+                                marc_dbe_stats["avg_boundary_change"][dim].append(change)
+            
         except Exception as e:
             if verbose:
                 print(f"Error evaluating result {idx}: {e}")
@@ -122,6 +173,21 @@ def evaluate_method(result_path, K, K2, mode="nl", verbose=True):
                 "accuracy": "-",
                 "samples": 0
             }
+    
+    # Add MARC-DBE integration statistics
+    if is_marc:
+        results["marc_dbe_integration"] = {
+            "boundary_updates_count": marc_dbe_stats["boundary_updates"],
+            "agent_count": marc_dbe_stats["agent_count"],
+            "collaboration_count": marc_dbe_stats["collaboration_count"],
+        }
+        
+        # Calculate average boundary changes
+        for dim, changes in marc_dbe_stats["avg_boundary_change"].items():
+            if changes:
+                results["marc_dbe_integration"][f"avg_{dim}_change"] = round(sum(changes) / len(changes) * 100, 2)
+            else:
+                results["marc_dbe_integration"][f"avg_{dim}_change"] = 0
     
     # Print results table if verbose
     if verbose:
@@ -155,6 +221,25 @@ def evaluate_method(result_path, K, K2, mode="nl", verbose=True):
         ])
         
         print(table)
+        
+        # Print MARC-DBE integration statistics if applicable
+        if is_marc:
+            print("\nMARC-DBE Integration Statistics:")
+            dbe_table = PrettyTable()
+            dbe_table.field_names = ["Metric", "Value"]
+            
+            dbe_table.add_row(["Agent Count", marc_dbe_stats["agent_count"]])
+            dbe_table.add_row(["Boundary Updates Count", marc_dbe_stats["boundary_updates"]])
+            dbe_table.add_row(["Collaborative Subtasks", marc_dbe_stats["collaboration_count"]])
+            
+            for dim, changes in marc_dbe_stats["avg_boundary_change"].items():
+                if changes:
+                    dbe_table.add_row([
+                        f"Avg {dim.capitalize()} Boundary Change", 
+                        f"{round(sum(changes) / len(changes) * 100, 2)}%"
+                    ])
+            
+            print(dbe_table)
     
     return results
 
@@ -211,6 +296,22 @@ def compare_methods(methods, dataset_name, model_name, verbose=True):
         
         print(f"\nResults for {dataset_name} with {model_name}:")
         print(table)
+        
+        # Print MARC-DBE integration comparison if MARC is included
+        if "marc" in results:
+            print("\nMARC-DBE Integration:")
+            if "marc_dbe_integration" in results["marc"]:
+                dbe_stats = results["marc"]["marc_dbe_integration"]
+                dbe_table = PrettyTable()
+                dbe_table.field_names = ["Metric", "Value"]
+                
+                for metric, value in dbe_stats.items():
+                    dbe_table.add_row([
+                        metric.replace("_", " ").title(),
+                        f"{value}%" if "change" in metric else value
+                    ])
+                
+                print(dbe_table)
     
     return results
 
