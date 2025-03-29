@@ -66,6 +66,14 @@ class MARC:
         self.subtasks = []  # List of all subtasks
         self.requestors = {}  # Dictionary of requestors for each agent
         self.boundary_updates = {}  # Track boundary updates during collaboration
+        
+        # Track collaboration metrics for debugging and evaluation
+        self.collaboration_metrics = {
+            "collaborations_attempted": 0,
+            "collaborations_succeeded": 0,
+            "boundary_triggered_count": 0,
+            "dimensions_exceeded": defaultdict(int)
+        }
 
     def _log(self, message):
         """
@@ -96,7 +104,10 @@ class MARC:
             "model": model_name,
             "current_task": None,
             "status": "idle",
-            "boundary_history": {k: [v] for k, v in boundary_profile.items()}  # Track boundary history
+            "boundary_history": {k: [v] for k, v in boundary_profile.items()},  # Track boundary history
+            "successes": 0,  # Track successful completions
+            "failures": 0,   # Track failures
+            "collaborations": 0  # Track participation in collaborations
         }
         
         # Create a DBE instance for this agent
@@ -333,30 +344,39 @@ class MARC:
         planner = self.agents[planner_agent_id]
         planner_model = planner["model"]
         
-        # Prepare the prompt for task decomposition
+        # IMPROVED: Enhanced decomposition prompt for better task breakdown
         decomposition_prompt = f"""
-        You are a task planning expert. Your role is to break down a complex reasoning task into smaller, manageable subtasks.
+        You are a task planning expert specializing in decomposing complex reasoning problems into manageable subtasks.
+        
+        INSTRUCTIONS:
+        - Break down this complex task into 4-6 clear subtasks
+        - For mathematical problems, include separate subtasks for parsing, formulating equations, calculation, and verification
+        - For logical problems, include steps for identifying premises, applying rules, drawing inferences, and validating
+        - Ensure subtasks are properly ordered with clear dependencies
+        - For difficult reasoning, create MORE granular subtasks with SMALLER reasoning steps
         
         For each subtask, provide:
-        1. A unique ID (e.g., "parse", "formulate", "solve")
-        2. A clear description of what needs to be done
+        1. A unique ID (e.g., "parse", "formulate", "calculate", "verify")
+        2. A detailed description of what needs to be done
         3. Dependencies (which subtasks must be completed before this one)
         
         Format your response as a JSON list with each subtask having these fields:
         - "id": unique identifier
-        - "description": clear description of the subtask
+        - "description": detailed description of the subtask
         - "dependencies": list of subtask IDs that must be completed first (empty list if none)
         
-        Task to decompose: {task}
+        COMPLEX TASK TO DECOMPOSE: {task}
         
         Response format example:
         [
-            {{"id": "parse", "description": "Parse the problem statement", "dependencies": []}},
-            {{"id": "formulate", "description": "Formulate the equations needed", "dependencies": ["parse"]}},
-            ...
+            {{"id": "parse", "description": "Parse the problem statement to identify variables, constraints, and what needs to be solved", "dependencies": []}},
+            {{"id": "formulate", "description": "Formulate the mathematical equations needed to solve this problem", "dependencies": ["parse"]}},
+            {{"id": "calculate", "description": "Perform calculations step by step to solve the equations", "dependencies": ["formulate"]}},
+            {{"id": "verify", "description": "Verify the solution by checking steps and substituting back", "dependencies": ["calculate"]}},
+            {{"id": "explain", "description": "Explain the final answer in context of the original problem", "dependencies": ["verify"]}}
         ]
         
-        Now please decompose the task:
+        Provide your task decomposition in valid JSON format:
         """
         
         # Make the API call to the planner agent
@@ -403,6 +423,12 @@ class MARC:
             # Validate and fix subtasks format
             subtasks = self._validate_subtasks(subtasks, task)
             
+            # IMPROVED: Ensure we have enough subtasks for complex problems
+            difficulty = self._estimate_task_complexity(task)
+            if difficulty > 3.5 and len(subtasks) < 5:
+                self._log(f"Task appears complex (difficulty {difficulty}), but only {len(subtasks)} subtasks created. Adding more granular steps.")
+                subtasks = self._add_granular_subtasks(subtasks, task)
+            
             # Save subtasks for future reference
             self.subtasks = subtasks
             self._log(f"Task decomposed into {len(subtasks)} subtasks")
@@ -435,6 +461,107 @@ class MARC:
             self._log(f"Using default decomposition with {len(subtasks)} subtasks")
             
             return subtasks
+    
+    def _estimate_task_complexity(self, task):
+        """
+        Estimate the overall complexity of a task
+        
+        Args:
+            task: The task text
+            
+        Returns:
+            Complexity score (1-5 scale)
+        """
+        # Count words as basic complexity measure
+        word_count = len(task.split())
+        
+        # Count special keywords that indicate complexity
+        complexity_indicators = [
+            "calculate", "compute", "solve", "find", "analyze", 
+            "evaluate", "prove", "explain", "compare", "derive"
+        ]
+        
+        indicator_count = sum(1 for indicator in complexity_indicators if indicator in task.lower())
+        
+        # Count numbers as indicator of calculation complexity
+        number_count = len(re.findall(r'\d+\.?\d*', task))
+        
+        # Step indicators suggest multi-step reasoning
+        step_indicators = ["first", "then", "next", "after", "finally", "step"]
+        step_indicator_count = sum(1 for indicator in step_indicators if indicator in task.lower())
+        
+        # Base complexity score
+        complexity = 1.0
+        
+        # Add factors
+        complexity += min(2.0, word_count / 50 * 0.5)  # Length factor
+        complexity += min(1.0, indicator_count * 0.3)  # Complexity indicators
+        complexity += min(1.0, number_count * 0.2)     # Number complexity
+        complexity += min(1.0, step_indicator_count * 0.3) # Step complexity
+        
+        return min(5.0, complexity)
+    
+    def _add_granular_subtasks(self, subtasks, task):
+        """
+        Add more granular subtasks for complex problems
+        
+        Args:
+            subtasks: Original subtasks
+            task: Original task
+            
+        Returns:
+            Enhanced subtasks
+        """
+        # Identify if this is a mathematical or logical task
+        task_type = self._identify_task_type(task)
+        
+        # For mathematical tasks, break calculation steps further
+        if task_type == "mathematical":
+            for st in subtasks:
+                if st["id"] == "calculate" or "solve" in st["id"]:
+                    # Add more granular calculation steps
+                    calculation_idx = subtasks.index(st)
+                    dependencies = st["dependencies"]
+                    
+                    # Replace with more granular steps
+                    subtasks[calculation_idx:calculation_idx+1] = [
+                        {"id": "setup_equations", "description": f"Set up the equations needed for calculation", "dependencies": dependencies},
+                        {"id": "perform_calculations", "description": f"Perform the step-by-step calculations, showing work for each operation", "dependencies": ["setup_equations"]},
+                        {"id": "double_check", "description": f"Double-check all calculations to ensure accuracy", "dependencies": ["perform_calculations"]}
+                    ]
+                    
+                    # Update dependencies of subsequent tasks
+                    for i in range(calculation_idx+3, len(subtasks)):
+                        if st["id"] in subtasks[i]["dependencies"]:
+                            subtasks[i]["dependencies"].remove(st["id"])
+                            subtasks[i]["dependencies"].append("double_check")
+                    
+                    break
+        
+        # For logical tasks, break inference steps further
+        elif task_type == "logical":
+            for st in subtasks:
+                if st["id"] == "infer" or "reason" in st["id"]:
+                    # Add more granular inference steps
+                    infer_idx = subtasks.index(st)
+                    dependencies = st["dependencies"]
+                    
+                    # Replace with more granular steps
+                    subtasks[infer_idx:infer_idx+1] = [
+                        {"id": "identify_relationships", "description": f"Identify relationships between key elements in the problem", "dependencies": dependencies},
+                        {"id": "apply_logic", "description": f"Apply logical rules and principles step by step", "dependencies": ["identify_relationships"]},
+                        {"id": "draw_conclusions", "description": f"Draw preliminary conclusions based on the logical analysis", "dependencies": ["apply_logic"]}
+                    ]
+                    
+                    # Update dependencies of subsequent tasks
+                    for i in range(infer_idx+3, len(subtasks)):
+                        if st["id"] in subtasks[i]["dependencies"]:
+                            subtasks[i]["dependencies"].remove(st["id"])
+                            subtasks[i]["dependencies"].append("draw_conclusions")
+                    
+                    break
+        
+        return subtasks
     
     def _validate_subtasks(self, subtasks, task):
         """
@@ -533,10 +660,13 @@ class MARC:
         Returns:
             List of subtasks
         """
+        # IMPROVED: More granular breakdown for mathematical tasks
         return [
             {"id": "parse", "description": f"Parse the mathematical problem: {task}", "dependencies": []},
-            {"id": "formulate", "description": "Formulate the mathematical equations needed", "dependencies": ["parse"]},
-            {"id": "solve", "description": "Solve the equations step by step", "dependencies": ["formulate"]},
+            {"id": "identify_variables", "description": "Identify all variables and what we need to solve for", "dependencies": ["parse"]},
+            {"id": "formulate", "description": "Formulate the mathematical equations needed", "dependencies": ["identify_variables"]},
+            {"id": "setup_calculations", "description": "Set up the step-by-step calculation approach", "dependencies": ["formulate"]},
+            {"id": "solve", "description": "Solve the equations step by step", "dependencies": ["setup_calculations"]},
             {"id": "verify", "description": "Verify the solution by checking steps and substituting back", "dependencies": ["solve"]},
             {"id": "explain", "description": "Explain the final answer in context of the original problem", "dependencies": ["verify"]}
         ]
@@ -551,10 +681,12 @@ class MARC:
         Returns:
             List of subtasks
         """
+        # IMPROVED: More granular breakdown for logical tasks
         return [
             {"id": "premises", "description": f"Identify the key premises in the problem: {task}", "dependencies": []},
             {"id": "rules", "description": "Identify logical rules or principles that apply", "dependencies": ["premises"]},
-            {"id": "infer", "description": "Draw logical inferences step by step", "dependencies": ["premises", "rules"]},
+            {"id": "relationships", "description": "Identify relationships between key elements", "dependencies": ["premises"]},
+            {"id": "infer", "description": "Draw logical inferences step by step", "dependencies": ["rules", "relationships"]},
             {"id": "validate", "description": "Check for logical fallacies or contradictions", "dependencies": ["infer"]},
             {"id": "conclude", "description": "Form a final conclusion based on the validated reasoning", "dependencies": ["validate"]}
         ]
@@ -569,11 +701,14 @@ class MARC:
         Returns:
             List of subtasks
         """
+        # IMPROVED: More granular breakdown for general tasks
         return [
             {"id": "analyze", "description": f"Analyze the key components of the problem: {task}", "dependencies": []},
             {"id": "research", "description": "Identify relevant facts and context", "dependencies": ["analyze"]},
             {"id": "structure", "description": "Structure an approach to address the problem", "dependencies": ["analyze", "research"]},
-            {"id": "reason", "description": "Apply reasoning to draw conclusions", "dependencies": ["structure"]},
+            {"id": "step1", "description": "Execute the first step of reasoning", "dependencies": ["structure"]},
+            {"id": "step2", "description": "Execute the second step of reasoning", "dependencies": ["step1"]},
+            {"id": "reason", "description": "Apply reasoning to draw conclusions", "dependencies": ["step2"]},
             {"id": "summarize", "description": "Summarize findings and provide a final answer", "dependencies": ["reason"]}
         ]
     
@@ -593,13 +728,16 @@ class MARC:
         # Base difficulty values by subtask type
         difficulty_templates = {
             "parse": {"calculation": 1.0, "planning": 2.0, "working_memory": 1.5},
+            "identify_variables": {"calculation": 1.5, "planning": 2.0, "working_memory": 2.0},
             "formulate": {"calculation": 2.0, "planning": 3.0, "working_memory": 2.5},
+            "setup_calculations": {"calculation": 2.5, "planning": 2.5, "working_memory": 2.0},
             "solve": {"calculation": 4.0, "planning": 2.0, "working_memory": 3.0},
             "verify": {"calculation": 3.0, "planning": 1.5, "working_memory": 4.0},
             "explain": {"calculation": 1.0, "planning": 2.5, "working_memory": 3.0},
             
             "premises": {"calculation": 1.0, "planning": 2.5, "working_memory": 2.0},
             "rules": {"calculation": 1.5, "planning": 3.0, "working_memory": 2.5},
+            "relationships": {"calculation": 2.0, "planning": 2.5, "working_memory": 3.0},
             "infer": {"calculation": 2.0, "planning": 4.0, "working_memory": 3.5},
             "validate": {"calculation": 2.5, "planning": 3.0, "working_memory": 4.0},
             "conclude": {"calculation": 1.5, "planning": 2.0, "working_memory": 3.0},
@@ -607,6 +745,8 @@ class MARC:
             "analyze": {"calculation": 1.5, "planning": 3.0, "working_memory": 2.0},
             "research": {"calculation": 1.0, "planning": 2.0, "working_memory": 3.0},
             "structure": {"calculation": 1.5, "planning": 4.0, "working_memory": 2.5},
+            "step1": {"calculation": 2.0, "planning": 2.5, "working_memory": 2.0},
+            "step2": {"calculation": 2.5, "planning": 2.5, "working_memory": 2.5},
             "reason": {"calculation": 2.5, "planning": 3.5, "working_memory": 3.0},
             "summarize": {"calculation": 1.0, "planning": 2.0, "working_memory": 3.5}
         }
@@ -689,6 +829,20 @@ class MARC:
                 # Use the most up-to-date boundary estimates
                 alignment = self.measure_boundary_alignment(agent["boundaries"], difficulty)
                 
+                # IMPROVED: Adjust alignment based on agent specialization
+                if agent["type"] == "calculator" and "calculation" in difficulty:
+                    # Boost calculator agents for calculation-heavy tasks
+                    if subtask["id"] in ["solve", "calculate", "perform_calculations"]:
+                        alignment *= 1.3
+                elif agent["type"] == "planner" and "planning" in difficulty:
+                    # Boost planner agents for planning-heavy tasks
+                    if subtask["id"] in ["formulate", "structure", "infer"]:
+                        alignment *= 1.3
+                elif agent["type"] == "verifier":
+                    # Boost verifier agents for validation tasks
+                    if subtask["id"] in ["verify", "validate", "double_check"]:
+                        alignment *= 1.5
+                
                 if alignment > best_alignment:
                     best_alignment = alignment
                     best_agent = agent_id
@@ -724,23 +878,39 @@ class MARC:
         difficulty = self.estimate_task_difficulty(subtask)
         agent = self.agents[agent_id]
         
+        # IMPROVED: Lower threshold for boundary detection to encourage collaboration
         # Check if task is beyond agent's boundaries
         beyond_boundary = False
+        exceeded_dimensions = []
+        
         for dim, diff in difficulty.items():
-            if dim in agent["boundaries"] and diff > agent["boundaries"][dim] * 1.2:
+            # CHANGED: Reduced threshold from 1.2 to 0.9 to detect boundary issues earlier
+            if dim in agent["boundaries"] and diff > agent["boundaries"][dim] * 0.9:
                 beyond_boundary = True
+                exceeded_dimensions.append(dim)
                 self._log(f"Subtask {subtask['id']} exceeds agent {agent_id}'s {dim} boundary")
-                break
+                
+                # Track which dimensions are being exceeded most often
+                self.collaboration_metrics["dimensions_exceeded"][dim] += 1
         
         if beyond_boundary:
+            # Track boundary triggering
+            self.collaboration_metrics["boundary_triggered_count"] += 1
+            
             # Agent struggles with this task
+            self._log(f"Agent {agent_id} encountered boundary limitations on dimensions: {', '.join(exceeded_dimensions)}")
+            
+            # Increment agent failure count
+            agent["failures"] += 1
+            
             return {
                 "status": "boundary_reached",
                 "subtask_id": subtask["id"],
                 "agent_id": agent_id,
+                "exceeded_dimensions": exceeded_dimensions,
                 "result": None,
                 "confidence": 0.3,
-                "message": f"This task exceeds my capabilities in one or more reasoning dimensions."
+                "message": f"This task exceeds my capabilities in: {', '.join(exceeded_dimensions)}"
             }
         
         # Get relevant solution components for dependencies
@@ -785,16 +955,26 @@ class MARC:
             # Analyze confidence in the response
             confidence = self._analyze_confidence(response_text)
             
+            # IMPROVED: Lower confidence threshold to trigger collaboration more often
             # If confidence is too low, consider it as boundary reached
-            if confidence < 0.4:
+            if confidence < 0.5:  # Changed from 0.4 to 0.5
+                self._log(f"Agent {agent_id} has low confidence ({confidence:.2f}) in response to subtask {subtask['id']}")
+                
+                # Increment agent failure count
+                agent["failures"] += 1
+                
                 return {
                     "status": "boundary_reached",
                     "subtask_id": subtask["id"],
                     "agent_id": agent_id,
+                    "exceeded_dimensions": ["confidence"],
                     "result": response_text,
                     "confidence": confidence,
                     "message": f"Low confidence in my response indicates I may have reached my reasoning boundary."
                 }
+            
+            # Increment agent success count
+            agent["successes"] += 1
             
             # Return successful result
             return {
@@ -808,6 +988,10 @@ class MARC:
             
         except Exception as e:
             self._log(f"Error processing subtask {subtask['id']}: {str(e)}")
+            
+            # Increment agent failure count
+            agent["failures"] += 1
+            
             return {
                 "status": "error",
                 "subtask_id": subtask["id"],
@@ -829,37 +1013,75 @@ class MARC:
         Returns:
             Prompt for the subtask
         """
-        # Add agent-specific role and task instructions
+        # IMPROVED: Enhanced role descriptions and task-specific instructions
         if agent_type == "planner":
-            role = "You are a strategic planning expert who excels at breaking down complex problems into clear steps."
+            role = "You are a strategic planning expert who excels at breaking down complex problems into clear steps and creating structured approaches to problem-solving."
         elif agent_type == "calculator":
-            role = "You are a mathematical calculation expert who performs precise computations with high accuracy."
+            role = "You are a mathematical calculation expert who performs precise computations with high accuracy. You show all work clearly and double-check your calculations."
         elif agent_type == "verifier":
-            role = "You are a verification expert who carefully checks work for errors and ensures correctness."
+            role = "You are a verification expert who carefully checks work for errors and ensures correctness. You have exceptional attention to detail and can identify inconsistencies."
         elif agent_type == "integrator":
-            role = "You are an integration expert who combines diverse pieces of information into coherent solutions."
+            role = "You are an integration expert who combines diverse pieces of information into coherent solutions. You excel at synthesizing information from multiple sources."
         else:
-            role = "You are a reasoning expert who solves complex problems methodically."
+            role = "You are a reasoning expert who solves complex problems methodically and carefully."
         
-        # Create the prompt
+        # Create the prompt with more detailed instructions
         prompt = f"{role}\n\n"
-        prompt += f"Task: {subtask['description']}\n\n"
+        prompt += f"TASK: {subtask['description']}\n\n"
         
-        # Add dependencies context
+        # Add dependencies context with clear formatting
         if context:
-            prompt += "Previous Work:\n"
+            prompt += "PREVIOUS WORK (IMPORTANT CONTEXT):\n"
             for dep_id, dep_result in context.items():
-                prompt += f"From {dep_id}: {dep_result}\n\n"
+                prompt += f"---- From subtask '{dep_id}' ----\n{dep_result}\n\n"
         
-        # Add specific instructions based on agent type
+        # Add specific instructions based on agent type and subtask
         if agent_type == "calculator":
-            prompt += "Show all calculation steps clearly. Double-check your work before providing the final answer.\n"
-        elif agent_type == "verifier":
-            prompt += "Carefully verify the work done so far. Check for errors, inconsistencies, or omissions.\n"
-        elif agent_type == "integrator":
-            prompt += "Synthesize the information from previous steps into a coherent solution.\n"
+            prompt += "INSTRUCTIONS:\n"
+            prompt += "1. Show all calculation steps clearly and explicitly\n"
+            prompt += "2. Label each step of your calculation process\n"
+            prompt += "3. Double-check your calculations before providing the final answer\n"
+            prompt += "4. If you're unsure about any step, state your confidence level\n"
+            
+            if "verify" in subtask["id"] or "check" in subtask["id"]:
+                prompt += "5. Verify results by plugging them back into the original equations\n"
         
-        prompt += "\nProvide your response:"
+        elif agent_type == "planner":
+            prompt += "INSTRUCTIONS:\n"
+            prompt += "1. Create a clear, structured approach to solving this problem\n"
+            prompt += "2. Break down complex steps into simpler components\n"
+            prompt += "3. Identify key decision points and alternative approaches\n"
+            prompt += "4. Make sure your plan addresses all aspects of the problem\n"
+        
+        elif agent_type == "verifier":
+            prompt += "INSTRUCTIONS:\n"
+            prompt += "1. Carefully check all reasoning steps and calculations\n"
+            prompt += "2. Verify that all constraints from the original problem are satisfied\n"
+            prompt += "3. Check for logical consistency throughout the solution\n"
+            prompt += "4. Identify any potential errors or areas of uncertainty\n"
+            prompt += "5. If you find errors, provide corrections\n"
+        
+        elif agent_type == "integrator":
+            prompt += "INSTRUCTIONS:\n"
+            prompt += "1. Synthesize information from all previous steps coherently\n"
+            prompt += "2. Resolve any contradictions between different components\n"
+            prompt += "3. Ensure the final solution addresses the original question\n"
+            prompt += "4. Present the solution clearly and logically\n"
+        
+        # Add task-specific instructions
+        if "solve" in subtask["id"] or "calculate" in subtask["id"]:
+            prompt += "\nFor this calculation task:\n"
+            prompt += "- Show each step of your work clearly\n"
+            prompt += "- Use a systematic approach\n"
+            prompt += "- Double-check your arithmetic\n"
+        
+        elif "formulate" in subtask["id"] or "setup" in subtask["id"]:
+            prompt += "\nFor this formulation task:\n"
+            prompt += "- Define all variables clearly\n"
+            prompt += "- State all relevant equations\n"
+            prompt += "- Explain the reasoning behind your formulation\n"
+        
+        prompt += "\nNow solve this task step by step, showing your complete reasoning process:"
         
         return prompt
     
@@ -987,44 +1209,65 @@ class MARC:
         """
         self._log(f"Agent {agent_id} requesting assistance for subtask {subtask_id}")
         
+        # IMPROVED: Enhanced assistance request with more specialized matching
         # Find agents with complementary strengths
         assistance_plan = []
         
-        # Identify the most challenging dimension
-        challenging_dim = max(difficulty, key=difficulty.get)
+        # Identify the most challenging dimensions (can be multiple)
+        challenging_dimensions = []
+        for dim, diff in difficulty.items():
+            if dim in self.agents[agent_id]["boundaries"]:
+                if diff > self.agents[agent_id]["boundaries"][dim] * 0.8:  # Using lower threshold
+                    challenging_dimensions.append((dim, diff))
         
-        # Find agent strong in this dimension
-        best_assistant = None
-        highest_boundary = -1
+        # Sort by difficulty ratio
+        challenging_dimensions.sort(key=lambda x: x[1] / self.agents[agent_id]["boundaries"].get(x[0], 1), reverse=True)
         
-        for assistant_id, assistant in self.agents.items():
-            if assistant_id != agent_id:
-                boundary = assistant["boundaries"].get(challenging_dim, 0)
+        # Take the most challenging dimension
+        if challenging_dimensions:
+            challenging_dim, dim_difficulty = challenging_dimensions[0]
+            
+            # Find agent strong in this dimension
+            best_assistant = None
+            highest_boundary = -1
+            
+            for assistant_id, assistant in self.agents.items():
+                if assistant_id != agent_id:
+                    boundary = assistant["boundaries"].get(challenging_dim, 0)
+                    
+                    # IMPROVED: Consider both absolute boundary and margin over difficulty
+                    margin = boundary - dim_difficulty
+                    if boundary > highest_boundary and margin > 0:
+                        highest_boundary = boundary
+                        best_assistant = assistant_id
+            
+            if best_assistant:
+                # Track the collaboration attempt in our metrics
+                self.collaboration_metrics["collaborations_attempted"] += 1
                 
-                if boundary > highest_boundary:
-                    highest_boundary = boundary
-                    best_assistant = assistant_id
-        
-        if best_assistant:
-            assistance_plan.append({
-                "subtask_id": subtask_id,
-                "lead_agent": agent_id,
-                "assistant_agent": best_assistant,
-                "focus_dimension": challenging_dim,
-                "collaboration_type": "assisted"
-            })
-            
-            # Create collaboration message
-            message = self.format_communication(
-                agent_id,
-                best_assistant,
-                subtask_id,
-                f"Request assistance with {challenging_dim} aspects of subtask {subtask_id}.",
-                content_type="assistance_request"
-            )
-            
-            self.communication_history.append(message)
-            self._log(f"Agent {agent_id} requested assistance from agent {best_assistant} for {challenging_dim}")
+                # Add to the assistant's collaboration count
+                self.agents[best_assistant]["collaborations"] += 1
+                
+                # Prepare the collaboration plan
+                assistance_plan.append({
+                    "subtask_id": subtask_id,
+                    "lead_agent": agent_id,
+                    "assistant_agent": best_assistant,
+                    "focus_dimension": challenging_dim,
+                    "collaboration_type": "assisted"
+                })
+                
+                # Create collaboration message
+                message = self.format_communication(
+                    agent_id,
+                    best_assistant,
+                    subtask_id,
+                    f"Request assistance with {challenging_dim} aspects of subtask {subtask_id}.",
+                    content_type="assistance_request"
+                )
+                
+                self.communication_history.append(message)
+                self._log(f"Agent {agent_id} requested assistance from agent {best_assistant} for {challenging_dim}")
         
         return assistance_plan
     
@@ -1074,22 +1317,52 @@ class MARC:
         # Get dependency context
         context = self._get_dependency_context(subtask)
         
-        # First, have the assistant agent focus on the challenging dimension
+        # IMPROVED: Enhanced assistant prompt with more specific guidance
         assistant_prompt = f"""
-        You are a {focus_dimension} expert. A collaborator needs help with this aspect of a problem.
+        You are a specialized {focus_dimension} expert. Another agent needs your help on a problem that exceeds their capabilities in this dimension.
         
-        Task: {subtask['description']}
+        COLLABORATIVE TASK: {subtask['description']}
         
-        Focus on providing help specifically with the {focus_dimension} aspects of this problem.
+        FOCUS SPECIFICALLY ON THIS ASPECT: {focus_dimension}
         
         Previous Work:
         """
         
         if context:
+            assistant_prompt += "\n--- CONTEXT FROM PREVIOUS STEPS ---\n"
             for dep_id, dep_result in context.items():
                 assistant_prompt += f"From {dep_id}: {dep_result}\n\n"
         
-        assistant_prompt += f"\nProvide your response focusing on the {focus_dimension} aspects:"
+        # Add dimension-specific instructions
+        if focus_dimension == "calculation":
+            assistant_prompt += """
+            INSTRUCTIONS FOR CALCULATION ASSISTANCE:
+            1. Show all calculation steps in complete detail
+            2. Double-check each calculation
+            3. Clarify any complex mathematical operations
+            4. If multiple calculation approaches exist, explain the most efficient one
+            5. Verify your work by substituting values back into the original equations
+            """
+        elif focus_dimension == "planning":
+            assistant_prompt += """
+            INSTRUCTIONS FOR PLANNING ASSISTANCE:
+            1. Break down the problem into smaller, manageable steps
+            2. Create a clear structured approach
+            3. Identify key decision points and strategies
+            4. Explain the reasoning behind your planning approach
+            5. Ensure your plan covers all aspects of the problem
+            """
+        elif focus_dimension == "working_memory":
+            assistant_prompt += """
+            INSTRUCTIONS FOR WORKING MEMORY ASSISTANCE:
+            1. Track and organize all relevant information clearly
+            2. Create a systematic way to keep track of multiple variables or entities
+            3. Highlight connections between different pieces of information
+            4. Summarize key information at each step
+            5. Create visual aids like tables or lists if helpful
+            """
+        
+        assistant_prompt += f"\nProvide your specialized {focus_dimension} assistance for solving this problem:"
         
         try:
             # Get the assistant's response
@@ -1120,23 +1393,36 @@ class MARC:
                 refined_estimates = dbe_instance.refine_boundary_estimates(error_patterns)
                 self.update_agent_boundaries(assistant_agent_id, refined_estimates)
             
-            # Now, have the lead agent complete the task with the assistant's input
+            # IMPROVED: Enhanced lead agent prompt with clearer guidance
             lead_prompt = f"""
-            You are working on solving this task: {subtask['description']}
+            You are working on solving this task collaboratively with another expert.
             
-            Another expert has provided assistance with the {focus_dimension} aspects:
+            TASK: {subtask['description']}
             
-            EXPERT ASSISTANCE:
+            You received specialized assistance with the {focus_dimension} aspects of this problem from another expert:
+            
+            ----- EXPERT ASSISTANCE WITH {focus_dimension.upper()} -----
             {assistant_text}
+            ----- END OF EXPERT ASSISTANCE -----
             
-            Previous Work:
+            Previous work from earlier steps:
             """
             
             if context:
+                lead_prompt += "\n--- CONTEXT FROM PREVIOUS STEPS ---\n"
                 for dep_id, dep_result in context.items():
                     lead_prompt += f"From {dep_id}: {dep_result}\n\n"
             
-            lead_prompt += "\nUsing this assistance, complete the task:"
+            lead_prompt += """
+            INSTRUCTIONS FOR COLLABORATIVE COMPLETION:
+            1. Carefully incorporate the expert's assistance into your solution
+            2. Use their expertise to overcome the limitations you faced
+            3. Build on their work to complete the task
+            4. Credit their contribution in your response
+            5. Ensure your final solution is complete and addresses all aspects of the task
+            """
+            
+            lead_prompt += "\nProvide your complete solution to the task, leveraging the expert assistance:"
             
             # Get the lead agent's final response
             lead_requestor = self.requestors.get(lead_agent_id)
@@ -1167,10 +1453,15 @@ class MARC:
                 self.update_agent_boundaries(lead_agent_id, refined_estimates)
             
             # Combine the results
-            combined_result = f"Collaborative solution to subtask {subtask_id}:\n\n{lead_text}"
+            combined_result = f"Collaborative solution to subtask {subtask_id}:\n\n"
+            combined_result += f"Lead agent {lead_agent_id} worked with assistant agent {assistant_agent_id} on the {focus_dimension} aspects of this task.\n\n"
+            combined_result += lead_text
             
             # Analyze confidence
             confidence = self._analyze_confidence(lead_text)
+            
+            # Track successful collaboration
+            self.collaboration_metrics["collaborations_succeeded"] += 1
             
             return {
                 "status": "completed",
@@ -1178,7 +1469,12 @@ class MARC:
                 "agent_id": f"{lead_agent_id}+{assistant_agent_id}",
                 "result": combined_result,
                 "confidence": confidence,
-                "message": "Task completed through collaboration."
+                "message": "Task completed through collaboration.",
+                "collaboration_details": {
+                    "lead_agent": lead_agent_id,
+                    "assistant_agent": assistant_agent_id,
+                    "focus_dimension": focus_dimension
+                }
             }
             
         except Exception as e:
@@ -1380,28 +1676,53 @@ class MARC:
             self._log("No integrator agent available")
             return "No integrator agent available for synthesis."
         
+        # IMPROVED: Enhanced integration prompt with better structuring
         # Prepare the components for the prompt
         components_text = ""
-        for subtask_id, component in solution_components.items():
+        
+        # Sort solution components by dependency order for clearer integration
+        sorted_components = []
+        for subtask in self.subtasks:
+            if subtask["id"] in solution_components:
+                sorted_components.append((subtask["id"], solution_components[subtask["id"]]))
+        
+        for subtask_id, component in sorted_components:
+            subtitle = f"SOLUTION COMPONENT: {subtask_id.upper()}"
+            separator = "=" * len(subtitle)
+            
+            components_text += f"\n{separator}\n{subtitle}\n{separator}\n"
+            
             if isinstance(component, dict) and "result" in component:
-                components_text += f"Result from subtask {subtask_id}:\n{component['result']}\n\n"
+                # Add collaboration details if this was a collaborative solution
+                if "collaboration_details" in component:
+                    details = component["collaboration_details"]
+                    components_text += f"[Collaborative solution between agents {details['lead_agent']} and {details['assistant_agent']}]\n"
+                
+                components_text += f"{component['result']}\n"
             elif isinstance(component, str):
-                components_text += f"Result from subtask {subtask_id}:\n{component}\n\n"
+                components_text += f"{component}\n"
         
         # Create the integration prompt
         integration_prompt = f"""
         You are a solution integrator expert. Your task is to synthesize multiple partial solutions into a coherent final answer.
         
+        IMPORTANT: These solution components represent different parts of solving a complex problem. You must integrate them into a complete, logical solution.
+        
         Component solutions:
         {components_text}
         
-        Please synthesize these components into a complete, coherent solution.
-        Your synthesis should include:
-        1. A clear integration of all relevant information from the components
-        2. A logical flow between the different parts
-        3. A final answer that addresses the original problem
+        INTEGRATION INSTRUCTIONS:
+        1. Create a coherent narrative that flows naturally through all steps
+        2. Ensure all critical information from each component is included
+        3. Resolve any inconsistencies between components
+        4. Organize the information in a logical sequence
+        5. Highlight key insights and results
+        6. Provide a clear, final answer that directly addresses the original problem
+        7. Remove redundant information and streamline the solution
         
-        Provide your synthesized solution:
+        Your synthesized solution should read as a unified whole, not as separate pieces stitched together.
+        
+        Provide your complete, integrated solution:
         """
         
         try:
@@ -1483,28 +1804,35 @@ class MARC:
                 "verified_solution": solution
             }
         
-        # Create the verification prompt
+        # IMPROVED: Enhanced verification prompt with more rigorous checks
         verification_prompt = f"""
-        You are a verification expert. Your task is to evaluate whether a solution correctly and completely addresses the original problem.
+        You are a verification expert with exceptional attention to detail. Your task is to rigorously evaluate whether the proposed solution correctly and completely addresses the original problem.
         
-        Original problem:
+        ORIGINAL PROBLEM:
         {task}
         
-        Proposed solution:
+        PROPOSED SOLUTION:
         {solution}
         
-        Please verify this solution by:
-        1. Checking if all aspects of the problem are addressed
-        2. Verifying the correctness of reasoning and calculations
-        3. Identifying any errors, inconsistencies, or omissions
+        VERIFICATION CHECKLIST - Carefully check each of these aspects:
+        1. Completeness: Does the solution address all parts and requirements of the original problem?
+        2. Correctness: Are all calculations, logical steps, and reasoning valid and accurate?
+        3. Consistency: Are there any contradictions or inconsistencies in the solution?
+        4. Clarity: Is the solution presented in a clear, understandable way?
+        5. Answer validation: Is the final answer directly responsive to what was asked?
         
-        Your response should include:
-        1. A clear verdict on whether the solution is valid (Yes/No)
-        2. Your confidence level in this assessment (0-100%)
-        3. Specific feedback on any issues found
-        4. A corrected or improved version if necessary
+        For any mathematical calculations, re-perform them independently to verify correctness.
+        For logical reasoning, check that each conclusion follows from the premises.
         
-        Provide your verification:
+        YOUR DETAILED VERIFICATION SHOULD INCLUDE:
+        1. A clear verdict (Valid/Invalid) with confidence percentage (0-100%)
+        2. Specific evaluation of each checklist item above
+        3. Identification of any errors, inconsistencies, or omissions found
+        4. A corrected or improved version of the solution if necessary
+        
+        Be extremely detail-oriented - your job is to catch any possible issues.
+        
+        Provide your comprehensive verification:
         """
         
         try:
@@ -1540,7 +1868,8 @@ class MARC:
                 self.update_agent_boundaries(verifier_id, refined_estimates)
             
             # Parse the verification result
-            valid = "yes" in response_text.lower() and "no" not in response_text.lower()[:50]
+            valid = ("valid" in response_text.lower() and not "invalid" in response_text.lower()[:100]) or \
+                   ("yes" in response_text.lower() and "no" not in response_text.lower()[:100])
             
             # Extract confidence
             confidence_match = re.search(r'confidence.*?(\d+)%', response_text, re.IGNORECASE)
@@ -1590,6 +1919,14 @@ class MARC:
         self.solution_components = {}
         self.communication_history = []
         self.consensus_votes = defaultdict(dict)
+        
+        # Reset collaboration metrics for this task
+        self.collaboration_metrics = {
+            "collaborations_attempted": 0,
+            "collaborations_succeeded": 0,
+            "boundary_triggered_count": 0,
+            "dimensions_exceeded": defaultdict(int)
+        }
         
         # Record the start of collaboration
         collaboration_record = {
@@ -1705,15 +2042,15 @@ class MARC:
                     self.agents[agent_id]["status"] = "idle"
                     self.agents[agent_id]["current_task"] = None
                     
+                    # IMPROVED: More significant boundary updates based on successful completion
                     # Update boundary estimates based on successful completion
                     if agent_id in self.dbe_instances:
-                        dbe_instance = self.dbe_instances[agent_id]
-                        # Successful completion might warrant a positive adjustment to boundaries
                         difficulty = self.estimate_task_difficulty(subtask)
                         for dim, diff in difficulty.items():
                             if dim in self.agents[agent_id]["boundaries"]:
-                                # Slightly increase boundary for this dimension based on success
-                                self.agents[agent_id]["boundaries"][dim] *= 1.05
+                                # Significantly increase boundary for this dimension based on success
+                                # CHANGED: Increased factor from 1.05 to 1.15 for more pronounced adaptation
+                                self.agents[agent_id]["boundaries"][dim] *= 1.15
                                 self.agents[agent_id]["boundary_history"][dim].append(self.agents[agent_id]["boundaries"][dim])
                     
                     self._log(f"Subtask {subtask_id} completed successfully by agent {agent_id}")
@@ -1723,12 +2060,15 @@ class MARC:
                     difficulty = self.estimate_task_difficulty(subtask)
                     assistance_plan = self.request_assistance(agent_id, subtask_id, difficulty)
                     
+                    # IMPROVED: More aggressive boundary updates on failure
                     # Update boundary estimates to reflect the difficulty limits
                     if agent_id in self.dbe_instances:
-                        for dim, diff in difficulty.items():
-                            if dim in self.agents[agent_id]["boundaries"] and diff > self.agents[agent_id]["boundaries"][dim]:
-                                # Adjust boundary downward based on failure
-                                adjusted = max(0.9 * self.agents[agent_id]["boundaries"][dim], diff * 0.8)
+                        exceeded_dimensions = result.get("exceeded_dimensions", [])
+                        for dim in exceeded_dimensions:
+                            if dim in self.agents[agent_id]["boundaries"] and dim in difficulty:
+                                # Adjust boundary downward more significantly based on failure
+                                # CHANGED: Increased adjustment magnitude from 0.9 to 0.8 for quicker adaptation
+                                adjusted = max(0.8 * self.agents[agent_id]["boundaries"][dim], difficulty[dim] * 0.7)
                                 self.agents[agent_id]["boundaries"][dim] = adjusted
                                 self.agents[agent_id]["boundary_history"][dim].append(adjusted)
                     
@@ -1753,18 +2093,21 @@ class MARC:
                             self.solution_components[subtask_id] = collaborative_result
                             action_record["collaborative_result"] = "success"
                             
+                            # IMPROVED: More significant boundary updates based on collaboration
                             # Update boundaries based on successful collaboration
                             if lead_agent in self.dbe_instances and assistant_agent in self.dbe_instances:
-                                # Lead agent gets a slight boundary decrease in the challenging dimension
+                                # Lead agent gets a boundary decrease in the challenging dimension
                                 if focus_dimension in self.agents[lead_agent]["boundaries"]:
-                                    self.agents[lead_agent]["boundaries"][focus_dimension] *= 0.95
+                                    # CHANGED: Increased adjustment magnitude from 0.95 to 0.85
+                                    self.agents[lead_agent]["boundaries"][focus_dimension] *= 0.85
                                     self.agents[lead_agent]["boundary_history"][focus_dimension].append(
                                         self.agents[lead_agent]["boundaries"][focus_dimension]
                                     )
                                 
-                                # Assistant agent gets a slight boundary increase in their strong dimension
+                                # Assistant agent gets a boundary increase in their strong dimension
                                 if focus_dimension in self.agents[assistant_agent]["boundaries"]:
-                                    self.agents[assistant_agent]["boundaries"][focus_dimension] *= 1.05
+                                    # CHANGED: Increased adjustment magnitude from 1.05 to 1.2
+                                    self.agents[assistant_agent]["boundaries"][focus_dimension] *= 1.2
                                     self.agents[assistant_agent]["boundary_history"][focus_dimension].append(
                                         self.agents[assistant_agent]["boundaries"][focus_dimension]
                                     )
@@ -1791,7 +2134,7 @@ class MARC:
                             
                             # Apply consensus decision
                             if votes:
-                                # Simulate resolution based on consensus
+# Simulate resolution based on consensus
                                 fallback_result = {
                                     "status": "completed_with_limitations",
                                     "subtask_id": subtask_id,
@@ -1848,7 +2191,8 @@ class MARC:
         
         collaboration_record["phases"].append({
             "phase": "processing",
-            "rounds": processing_rounds
+            "rounds": processing_rounds,
+            "collaboration_metrics": self.collaboration_metrics  # Add collaboration metrics to the record
         })
         
         # Phase 4: Integration
@@ -1893,6 +2237,9 @@ class MARC:
         # Final boundary states
         collaboration_record["final_boundaries"] = {agent_id: agent["boundaries"].copy() for agent_id, agent in self.agents.items()}
         collaboration_record["boundary_history"] = {agent_id: agent["boundary_history"] for agent_id, agent in self.agents.items()}
+        
+        # Add collaboration metrics to the final record
+        collaboration_record["collaboration_metrics"] = self.collaboration_metrics
         
         self._log("Task solving completed")
         return collaboration_record
