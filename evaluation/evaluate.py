@@ -9,6 +9,8 @@ import tiktoken
 from prettytable import PrettyTable
 from tqdm import tqdm
 
+import sys
+sys.path.append('/workspace/adaptive-reasoning-boundaries')
 from utils.request_tool import RequestOutput
 from utils.tools import get_combined_granularity, categorize_boundary
 from evaluation.metrics import extract_answer, boundary_performance, token_efficiency
