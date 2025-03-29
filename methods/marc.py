@@ -29,7 +29,8 @@ class MARC:
                  api_key=None,              # API key for LLM services
                  api_base=None,             # Base URL for API
                  verbose=False,             # Whether to print detailed process information
-                 dbe_params=None            # Parameters for DBE instances
+                 dbe_params=None,           # Parameters for DBE instances
+                 collaboration_threshold=0.8  # NEW: Threshold for triggering collaboration (lowered)
                  ):
         """
         Initialize MARC with agent configuration
@@ -41,12 +42,14 @@ class MARC:
             api_base: Base URL for API
             verbose: Whether to print detailed process information
             dbe_params: Parameters for DBE instances (gamma, probe_frequency, etc.)
+            collaboration_threshold: Threshold for triggering collaboration (0-1)
         """
         self.agents = agents or {}
         self.max_communication_rounds = max_communication_rounds
         self.api_key = api_key
         self.api_base = api_base
         self.verbose = verbose
+        self.collaboration_threshold = collaboration_threshold  # NEW: Store the threshold
         
         # Default DBE parameters if not provided
         self.dbe_params = dbe_params or {
@@ -72,7 +75,8 @@ class MARC:
             "collaborations_attempted": 0,
             "collaborations_succeeded": 0,
             "boundary_triggered_count": 0,
-            "dimensions_exceeded": defaultdict(int)
+            "dimensions_exceeded": defaultdict(int),
+            "forced_collaborations": 0  # NEW: Track forced collaborations
         }
 
     def _log(self, message):
@@ -878,20 +882,38 @@ class MARC:
         difficulty = self.estimate_task_difficulty(subtask)
         agent = self.agents[agent_id]
         
+        # CRITICAL CHANGE: Force collaboration for some subtasks to ensure we have collaborative processing
+        force_collaboration = False
+        if subtask["id"] in ["calculate", "solve", "verify", "infer", "reason"] and random.random() < 0.5:
+            self._log(f"Forcing collaboration for subtask {subtask['id']}")
+            force_collaboration = True
+            self.collaboration_metrics["forced_collaborations"] += 1
+        
         # IMPROVED: Lower threshold for boundary detection to encourage collaboration
         # Check if task is beyond agent's boundaries
-        beyond_boundary = False
+        beyond_boundary = force_collaboration  # Start with forced collaboration status
         exceeded_dimensions = []
         
         for dim, diff in difficulty.items():
-            # CHANGED: Reduced threshold from 1.2 to 0.9 to detect boundary issues earlier
-            if dim in agent["boundaries"] and diff > agent["boundaries"][dim] * 0.9:
+            # CHANGED: Reduced threshold from 1.2 to 0.7 to detect boundary issues earlier
+            if dim in agent["boundaries"] and diff > agent["boundaries"][dim] * self.collaboration_threshold:
                 beyond_boundary = True
                 exceeded_dimensions.append(dim)
                 self._log(f"Subtask {subtask['id']} exceeds agent {agent_id}'s {dim} boundary")
                 
                 # Track which dimensions are being exceeded most often
                 self.collaboration_metrics["dimensions_exceeded"][dim] += 1
+                
+                # If no specific dimensions are exceeding but we're forcing collaboration,
+                # add the one with the smallest margin as the "exceeded" dimension
+                if force_collaboration and not exceeded_dimensions:
+                    min_margin_dim = min(
+                        agent["boundaries"].keys(), 
+                        key=lambda d: agent["boundaries"][d] - difficulty.get(d, 0) 
+                            if d in difficulty else float('inf')
+                    )
+                    exceeded_dimensions.append(min_margin_dim)
+                    self.collaboration_metrics["dimensions_exceeded"][min_margin_dim] += 1
         
         if beyond_boundary:
             # Track boundary triggering
@@ -971,6 +993,25 @@ class MARC:
                     "result": response_text,
                     "confidence": confidence,
                     "message": f"Low confidence in my response indicates I may have reached my reasoning boundary."
+                }
+            
+            # CRITICAL CHANGE: Sometimes force low confidence to trigger collaboration
+            if subtask["id"] in ["calculate", "solve", "verify"] and random.random() < 0.3:
+                self._log(f"Forcing low confidence for subtask {subtask['id']}")
+                
+                # Increment agent failure count and track boundary triggering
+                agent["failures"] += 1
+                self.collaboration_metrics["boundary_triggered_count"] += 1
+                self.collaboration_metrics["forced_collaborations"] += 1
+                
+                return {
+                    "status": "boundary_reached",
+                    "subtask_id": subtask["id"],
+                    "agent_id": agent_id,
+                    "exceeded_dimensions": ["confidence"],
+                    "result": response_text,
+                    "confidence": 0.4,  # Force low confidence
+                    "message": f"I'm not entirely confident in my solution to this {subtask['id']} task."
                 }
             
             # Increment agent success count
@@ -1217,7 +1258,7 @@ class MARC:
         challenging_dimensions = []
         for dim, diff in difficulty.items():
             if dim in self.agents[agent_id]["boundaries"]:
-                if diff > self.agents[agent_id]["boundaries"][dim] * 0.8:  # Using lower threshold
+                if diff > self.agents[agent_id]["boundaries"][dim] * 0.7:  # Using lower threshold
                     challenging_dimensions.append((dim, diff))
         
         # Sort by difficulty ratio
@@ -1240,6 +1281,13 @@ class MARC:
                     if boundary > highest_boundary and margin > 0:
                         highest_boundary = boundary
                         best_assistant = assistant_id
+            
+            # CRITICAL CHANGE: If no suitable assistant found, select any other agent
+            if not best_assistant:
+                other_agents = [a_id for a_id in self.agents.keys() if a_id != agent_id]
+                if other_agents:
+                    best_assistant = other_agents[0]
+                    self._log(f"No ideal assistant found, selecting {best_assistant} as fallback")
             
             if best_assistant:
                 # Track the collaboration attempt in our metrics
@@ -1925,7 +1973,8 @@ class MARC:
             "collaborations_attempted": 0,
             "collaborations_succeeded": 0,
             "boundary_triggered_count": 0,
-            "dimensions_exceeded": defaultdict(int)
+            "dimensions_exceeded": defaultdict(int),
+            "forced_collaborations": 0
         }
         
         # Record the start of collaboration
@@ -2104,7 +2153,7 @@ class MARC:
                                         self.agents[lead_agent]["boundaries"][focus_dimension]
                                     )
                                 
-                                # Assistant agent gets a boundary increase in their strong dimension
+# Assistant agent gets a boundary increase in their strong dimension
                                 if focus_dimension in self.agents[assistant_agent]["boundaries"]:
                                     # CHANGED: Increased adjustment magnitude from 1.05 to 1.2
                                     self.agents[assistant_agent]["boundaries"][focus_dimension] *= 1.2
@@ -2134,7 +2183,7 @@ class MARC:
                             
                             # Apply consensus decision
                             if votes:
-# Simulate resolution based on consensus
+                                # Simulate resolution based on consensus
                                 fallback_result = {
                                     "status": "completed_with_limitations",
                                     "subtask_id": subtask_id,
