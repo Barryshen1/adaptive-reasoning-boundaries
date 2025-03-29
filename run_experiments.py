@@ -13,6 +13,7 @@ from tqdm import tqdm
 from methods.a_marp import AMARP
 from methods.dbe import DBE
 from methods.marc import MARC
+from methods.marp import MARP  # Added import for MARP
 from data.loaders.dataset_loaders import get_dataset_loader
 from utils.request_tool import MMRequestor
 from utils.tools import estimate_task_difficulty
@@ -40,7 +41,7 @@ async def run_experiment(
     Run an experiment with a specific method, dataset, and model
     
     Args:
-        method_name: Name of the method (a_marp, dbe, marc, standard_cot)
+        method_name: Name of the method (a_marp, dbe, marc, standard_cot, marp)
         dataset_name: Name of the dataset
         model_name: Name of the model
         api_key: API key for model access
@@ -88,6 +89,10 @@ async def run_experiment(
                 "probe_frequency": 5,
                 "probe_set_size": 7
             }
+        },
+        "marp": {  # Added default configuration for MARP
+            "max_operations_per_step": 5,
+            "max_multiplication_value": 1.5e5
         }
     }
     
@@ -161,6 +166,13 @@ async def run_experiment(
                 agent_config.get("boundaries", boundaries.get(agent_config["type"], {})),
                 agent_config.get("model", model_name)
             )
+    elif method_name == "marp":  # Added case for MARP method
+        method = MARP(
+            max_operations_per_step=method_config.get("max_operations_per_step", 5),
+            max_multiplication_value=method_config.get("max_multiplication_value", 1.5e5),
+            api_key=api_key,
+            verbose=(True if os.environ.get("DEBUG") else False)
+        )
     
     # Set up requestor with appropriate API
     model_type = "openai" if any(name in model_name for name in ["gpt", "o1", "o3"]) else \
@@ -219,6 +231,9 @@ async def run_experiment(
                     
                     # Create a standard prompt for evaluation consistency
                     prompt = f"Solve this collaborative reasoning task:\n{item['question']}"
+                elif method_name == "marp":  # Added case for MARP method
+                    # Directly use the MARP prompt generation
+                    prompt = method.generate_prompt(item["question"])
                 else:
                     raise ValueError(f"Unknown method: {method_name}")
                 
@@ -295,7 +310,7 @@ async def run_experiment(
 async def main():
     """Main function to run experiments"""
     parser = argparse.ArgumentParser(description="Run reasoning experiments")
-    parser.add_argument("--method", type=str, required=True, help="Method (a_marp, dbe, marc, standard_cot)")
+    parser.add_argument("--method", type=str, required=True, help="Method (a_marp, dbe, marc, standard_cot, marp)")
     parser.add_argument("--dataset", type=str, required=True, help="Dataset name")
     parser.add_argument("--model", type=str, required=True, help="Model name")
     parser.add_argument("--api_key", type=str, help="API key (optional, will use environment variable if not provided)")
