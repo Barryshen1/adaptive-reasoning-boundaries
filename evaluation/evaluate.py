@@ -25,6 +25,12 @@ PARAM_DICT = {
         "mode": "nl",
         "result_path": "experiments/results/standard_cot_{dataset}_{model}.jsonl"
     },
+    "marp": {  # Added original MARP method
+        "K": 0.106,
+        "K2": 0.425,
+        "mode": "nl",
+        "result_path": "experiments/results/marp_{dataset}_{model}.jsonl"
+    },
     "a_marp": {
         "K": 0.12,
         "K2": 0.53,
@@ -321,7 +327,7 @@ def compare_methods(methods, dataset_name, model_name, verbose=True):
 def main():
     """Main evaluation function"""
     parser = argparse.ArgumentParser(description="Evaluate reasoning methods")
-    parser.add_argument("--method", type=str, default="all", help="Method to evaluate (all, standard_cot, a_marp, dbe, marc)")
+    parser.add_argument("--method", type=str, default="all", help="Method to evaluate (all, standard_cot, marp, a_marp, dbe, marc)")
     parser.add_argument("--dataset", type=str, required=True, help="Dataset name")
     parser.add_argument("--model", type=str, required=True, help="Model name")
     parser.add_argument("--result_path", type=str, help="Custom result path")
@@ -331,7 +337,7 @@ def main():
     args = parser.parse_args()
     
     if args.method.lower() == "all":
-        compare_methods(["standard_cot", "a_marp", "dbe", "marc"], args.dataset, args.model)
+        compare_methods(["standard_cot", "marp", "a_marp", "dbe", "marc"], args.dataset, args.model)
     elif args.method in PARAM_DICT:
         params = PARAM_DICT[args.method]
         result_path = args.result_path or params["result_path"].format(dataset=args.dataset, model=args.model)
